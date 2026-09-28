@@ -3583,6 +3583,19 @@ def _generation_clarification_recommendations(
     if not media:
         return {}
     preferences = preferences or {}
+    if set(media) == {"image", "video"}:
+        # A single supplied ratio is the safest recommendation for both parts
+        # of one image-to-video workflow. Explicitly distinct ratios remain
+        # distinct, and catalog capability checks below may still disable the
+        # one-click recommendation if either model cannot support that ratio.
+        if "video_aspect_ratio" in preferences and "image_aspect_ratio" not in preferences:
+            preferences = {
+                **preferences, "image_aspect_ratio": preferences["video_aspect_ratio"],
+            }
+        elif "image_aspect_ratio" in preferences and "video_aspect_ratio" not in preferences:
+            preferences = {
+                **preferences, "video_aspect_ratio": preferences["image_aspect_ratio"],
+            }
     confirmed: dict[str, Any] = {}
     if isinstance(answers, dict):
         for question_id, selection in answers.items():
@@ -9557,6 +9570,8 @@ TOOLS = (
                     "description": (
                         "Only generation specs explicitly stated by the user. Pass image/video "
                         "aspect ratios and whether video shots need generated speech/audio. "
+                        "When both media types are requested, one supplied aspect ratio is "
+                        "recommended for both if supported; pass both when intentionally distinct. "
                         "Use video_shot_durations_seconds for distinct shot lengths; each "
                         "WorkflowPlan video node must also carry its own durationSec. "
                         "delivery_resolution describes final output and does not set video_resolution. "

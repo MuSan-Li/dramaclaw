@@ -3558,6 +3558,71 @@ def test_generation_recommendation_uses_explicit_specs_and_keeps_delivery_separa
     }
 
 
+def test_generation_recommendation_shares_one_sided_ratio_for_image_video_card(monkeypatch):
+    plugin = _load_plugin_module()
+    handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
+    events = []
+    image_ratios = ["9:16", "16:9"]
+    monkeypatch.setattr(plugin, "_emit_clarification_event",
+                        lambda _project, _canvas, event: events.append(event) or "shown")
+    monkeypatch.setattr(plugin, "_request", lambda method, path, **_kwargs: {
+        "ok": True, "data": [{
+            "id": "newapi_seedance-2.0-fast", "ratioOptions": ["9:16", "16:9"],
+            "resolutionOptions": ["720P", "1080P"], "minDuration": 4,
+            "maxDuration": 15, "supportsGenerateAudio": True,
+        }] if "/video/models" in path else [{
+            "id": "LingShan-G2", "aliases": ["newapi_gpt_image2"],
+            "ratioOptions": image_ratios,
+            "resolutionOptions": ["1K"], "qualityOptions": ["medium"],
+        }],
+    })
+
+    handlers["freezone_request_user_clarification"]({
+        "project_id": "project-a", "generation_media_types": ["image", "video"],
+        "generation_preferences": {
+            "video_aspect_ratio": "16:9", "video_generate_audio": True,
+            "video_shot_durations_seconds": [8, 7],
+        },
+    })
+    assert events[0]["allow_recommended"] is True
+    assert events[0]["recommended_answers"]["image_aspect_ratio"] == {
+        "option_ids": ["16:9"]
+    }
+    assert events[0]["recommended_answers"]["video_aspect_ratio"] == {
+        "option_ids": ["16:9"]
+    }
+
+    handlers["freezone_request_user_clarification"]({
+        "project_id": "project-a", "generation_media_types": ["image", "video"],
+        "generation_preferences": {
+            "image_aspect_ratio": "9:16", "video_aspect_ratio": "16:9",
+            "video_generate_audio": True, "delivery_resolution": "1080p",
+        },
+    })
+    assert events[1]["recommended_answers"]["image_aspect_ratio"] == {
+        "option_ids": ["9:16"]
+    }
+    assert events[1]["recommended_answers"]["video_aspect_ratio"] == {
+        "option_ids": ["16:9"]
+    }
+
+    handlers["freezone_request_user_clarification"]({
+        "project_id": "project-a", "generation_media_types": ["image", "video"],
+        "generation_preferences": {"image_aspect_ratio": "16:9"},
+    })
+    assert events[2]["recommended_answers"]["video_aspect_ratio"] == {
+        "option_ids": ["16:9"]
+    }
+
+    image_ratios[:] = ["9:16"]
+    handlers["freezone_request_user_clarification"]({
+        "project_id": "project-a", "generation_media_types": ["image", "video"],
+        "generation_preferences": {"video_aspect_ratio": "16:9"},
+    })
+    assert events[3]["allow_recommended"] is False
+    assert "recommended_answers" not in events[3]
+
+
 def test_generation_recommendation_keeps_distinct_shot_durations_out_of_global_card(
     monkeypatch,
 ):
