@@ -1533,12 +1533,14 @@ def test_intent_items_restating_the_template_use_the_standard_planner(monkeypatc
             {"id": "outline", "title": "教程大纲", "prompt": "三步教你手冲咖啡",
              "recipe_id": "general-text"},
             {"id": "frame_1", "title": "步骤一画面", "prompt": "研磨咖啡豆的特写",
-             "recipe_id": "general-image", "depends_on": ["outline"]},
+             "recipe_id": "general-image", "depends_on": ["outline"],
+             "reference_inputs": ["outline"]},
             {"id": "clip_1", "title": "步骤一视频", "prompt": "研磨咖啡豆的特写",
              "recipe_id": "general-video", "depends_on": ["frame_1"],
              "timeline_role": "visual"},
             {"id": "frame_2", "title": "步骤二画面", "prompt": "注水闷蒸的慢镜头",
-             "recipe_id": "general-image", "depends_on": ["outline"]},
+             "recipe_id": "general-image", "depends_on": ["outline"],
+             "reference_inputs": ["outline"]},
             {"id": "clip_2", "title": "步骤二视频", "prompt": "注水闷蒸的慢镜头",
              "recipe_id": "general-video", "depends_on": ["frame_2"],
              "timeline_role": "visual"},
@@ -1577,7 +1579,8 @@ def test_intent_items_the_standard_planner_cannot_reproduce_stay_agent_authored(
             {"id": "outline", "title": "教程大纲", "prompt": "三步教你手冲咖啡",
              "recipe_id": "general-text"},
             {"id": "frame_1", "title": "步骤一画面", "prompt": "研磨咖啡豆",
-             "recipe_id": "general-image", "depends_on": ["outline"]},
+             "recipe_id": "general-image", "depends_on": ["outline"],
+             "reference_inputs": ["outline"]},
             {"id": "clip_1", "title": "步骤一视频", "prompt": "研磨咖啡豆的特写",
              "recipe_id": "general-video", "depends_on": ["frame_1"],
              "duration_seconds": 5},
@@ -1771,6 +1774,70 @@ def test_exact_plan_without_a_required_stage_is_a_preflight_blocker(monkeypatch)
     assert unused["code"] == "skill_stage_unused"
     assert unused["node_ids"] == ["clip_1", "clip_2"]
     assert "dependency_for" in unused["message"]
+
+
+def test_video_tutorial_outline_must_feed_every_step_image():
+    """A ready tutorial must consume the generated outline, not just wait for it."""
+    catalog = _load_catalog_module()
+    nodes = [
+        {"id": "outline", "node_type": "textAnnotationNode", "stage": "planning",
+         "data": {"workflowCatalog": {"recipeId": "general-text"}}},
+        {"id": "frame_1", "node_type": "imageGenNode", "stage": "images",
+         "data": {"workflowCatalog": {"recipeId": "general-image"}}},
+        {"id": "frame_2", "node_type": "imageGenNode", "stage": "images",
+         "data": {"workflowCatalog": {"recipeId": "general-image"}}},
+        {"id": "clip_1", "node_type": "videoNode", "stage": "video",
+         "data": {"workflowCatalog": {"recipeId": "general-video"}}},
+        {"id": "clip_2", "node_type": "videoNode", "stage": "video",
+         "data": {"workflowCatalog": {"recipeId": "general-video"}}},
+    ]
+    edges = [
+        {"source": "outline", "target": "frame_1", "link_type": "dependency_for"},
+        {"source": "outline", "target": "frame_2", "link_type": "dependency_for"},
+        {"source": "frame_1", "target": "clip_1", "link_type": "media_input_for"},
+        {"source": "frame_2", "target": "clip_2", "link_type": "media_input_for"},
+    ]
+    blockers = catalog.skill_stage_blockers("video-tutorial", nodes, edges)
+    assert [(item["code"], item["path"], item["node_ids"]) for item in blockers] == [
+        ("skill_stage_unused", "plan.stages.planning.feeds.images", ["frame_1", "frame_2"]),
+    ]
+
+    edges[0] = {**edges[0], "link_type": "prompt_for"}
+    blockers = catalog.skill_stage_blockers("video-tutorial", nodes, edges)
+    assert blockers[0]["node_ids"] == ["frame_2"]
+
+    edges[1] = {**edges[1], "link_type": "prompt_for"}
+    assert catalog.skill_stage_blockers("video-tutorial", nodes, edges) == []
+
+
+def test_agent_authored_tutorial_draft_blocks_order_only_outline(monkeypatch):
+    catalog = _load_catalog_module()
+    _install_real_builtin_catalog(monkeypatch, catalog)
+    intent = {
+        "skill_id": "video-tutorial",
+        "user_goal": "制作两步操作教程",
+        "items": [
+            {"id": "outline", "title": "教程文案", "prompt": "列出两个步骤",
+             "recipe_id": "general-text"},
+            {"id": "frame", "title": "步骤图", "prompt": "展示第一步",
+             "recipe_id": "general-image", "depends_on": ["outline"]},
+            {"id": "clip", "title": "步骤视频", "prompt": "展示步骤图",
+             "recipe_id": "general-video", "depends_on": ["frame"],
+             "duration_seconds": 5},
+        ],
+    }
+    blocked = catalog.compile_workflow_intent(intent)
+    assert blocked["ok"] is True
+    assert blocked["preflight"]["status"] == "blocked"
+    assert [(item["code"], item["path"]) for item in blocked["preflight"]["blockers"]] == [
+        ("skill_stage_unused", "plan.stages.planning.feeds.images"),
+    ]
+
+    intent["items"][1]["reference_inputs"] = ["outline"]
+    ready = catalog.compile_workflow_intent(intent)
+    assert ready["ok"] is True
+    assert ready["preflight"]["status"] == "ready"
+    assert ready["preflight"]["blockers"] == []
 
 
 def test_intent_items_without_a_required_stage_are_a_preflight_blocker(monkeypatch):
