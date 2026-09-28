@@ -235,7 +235,7 @@ _DETERMINISTIC_SKILL_PLANNERS = {
             _stage("video", "videoNode", ["general-video"], required=True),
             _stage("audio", "audioNode", ["general-audio"], required=False),
         ],
-        "edges": [["images", "video"]],
+        "edges": [["planning", "images"], ["images", "video"]],
     },
     "short-drama-quick": {
         "default_item_count": 3,
@@ -2006,7 +2006,11 @@ def _standard_skill_items(
                     prompt=unit["prompt"],
                     recipe_id="general-image",
                     depends_on=["outline"],
-                    reference_inputs=(["outline"] if skill_id == "text-to-image-video" else None),
+                    reference_inputs=(
+                        ["outline"]
+                        if skill_id in {"text-to-image-video", "video-tutorial"}
+                        else None
+                    ),
                     stage="images",
                 )
             )
