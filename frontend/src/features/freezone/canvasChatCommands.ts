@@ -35,6 +35,7 @@ import {
   createFreezoneWorkflowRun,
   updateFreezoneWorkflowRun,
   type FreezonePresetCanvasRequest,
+  type FreezoneWorkflowRun,
   type WorkflowRunActionStatus,
 } from "@/api/canvas";
 import {
@@ -517,6 +518,14 @@ const WORKFLOW_ACTION_CONCURRENCY = 3;
 const WORKFLOW_ACTION_MAX_RETRIES = 2;
 const WORKFLOW_STOPPED_MESSAGE = "工作流已停止，未启动后续节点。";
 const WORKFLOW_LEASE_LOST_MESSAGE = "工作流执行租约已失效，已停止启动后续节点。"; // i18n-exempt
+const TERMINAL_WORKFLOW_RUN_STATUSES = new Set<string>([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+const workflowRunEndedMessage = (status: string) =>
+  `工作流运行已结束（${status}），已停止启动后续节点；请继续工作流以完成未完成的部分。`; // i18n-exempt
 const workflowPersistenceFailureMessage = (error: unknown) =>
   `工作流状态保存失败，已停止启动后续节点：${errorMessage(error)}`; // i18n-exempt
 const workflowCreationFailureMessage = (error: unknown) =>
@@ -2834,9 +2843,24 @@ async function executeQueuedNodeActions(
       workflowHeartbeatQueue = queued.catch(() => undefined);
       return queued;
     };
+    // A terminal run PATCH still returns 200 with the unchanged record, so the
+    // runner must read the status back instead of treating 200 as a renewed
+    // lease (issue #730).
+    const observeWorkflowRunStatus = (run: FreezoneWorkflowRun) => {
+      if (!TERMINAL_WORKFLOW_RUN_STATUSES.has(run.status)) return;
+      workflowLeaseLost = true;
+      workflowPersistenceError = workflowRunEndedMessage(run.status);
+    };
+    let workflowVisibilityListener: (() => void) | null = null;
+    // Renews the lease and resolves once the server's run status is observed.
+    let confirmWorkflowRunActive: () => Promise<void> = async () => undefined;
     const stopWorkflowHeartbeat = () => {
       if (workflowHeartbeat !== null) clearInterval(workflowHeartbeat);
       workflowHeartbeat = null;
+      if (workflowVisibilityListener && typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", workflowVisibilityListener);
+      }
+      workflowVisibilityListener = null;
     };
     if (projectId && canvasId) {
       try {
@@ -2895,19 +2919,30 @@ async function executeQueuedNodeActions(
           }));
         }
         const runId = workflowRunId;
-        workflowHeartbeat = setInterval(() => {
-          void enqueueWorkflowHeartbeat(async () => {
-            await updateFreezoneWorkflowRun(projectId, canvasId, runId, {
+        const sendWorkflowHeartbeat = async (): Promise<void> => {
+          if (workflowLeaseLost) return;
+          await enqueueWorkflowHeartbeat(async () => {
+            const heartbeatRun = await updateFreezoneWorkflowRun(projectId, canvasId, runId, {
               status: "running",
               runner_id: workflowRunnerId,
             });
+            observeWorkflowRunStatus(heartbeatRun);
           }).catch((error) => {
             if (error instanceof ApiError && error.status === 409) workflowLeaseLost = true;
             workflowPersistenceError = error instanceof ApiError && error.status === 409
               ? WORKFLOW_LEASE_LOST_MESSAGE
               : workflowPersistenceFailureMessage(error);
           });
-        }, 15_000);
+        };
+        confirmWorkflowRunActive = sendWorkflowHeartbeat;
+        workflowHeartbeat = setInterval(() => void sendWorkflowHeartbeat(), 15_000);
+        if (typeof document !== "undefined") {
+          // Background tabs throttle or freeze timers; renew as soon as the page is back.
+          workflowVisibilityListener = () => {
+            if (document.visibilityState === "visible") void sendWorkflowHeartbeat();
+          };
+          document.addEventListener("visibilitychange", workflowVisibilityListener);
+        }
       } catch (error) {
         if (error instanceof ApiError && error.status === 409) {
           const message = "当前画布已有工作流正在执行，请等待其完成后再试。";
@@ -2957,6 +2992,7 @@ async function executeQueuedNodeActions(
               ...(status ? { status } : {}),
               runner_id: workflowRunnerId,
             });
+            if (!status) observeWorkflowRunStatus(updatedRun);
             if (typeof window !== "undefined") {
               window.dispatchEvent(new CustomEvent(FREEZONE_WORKFLOW_RUN_UPDATED_EVENT, {
                 detail: {
@@ -3117,7 +3153,7 @@ async function executeQueuedNodeActions(
       }
       if (workflowLeaseLost) {
         runFailed = true;
-        result.errors.push(WORKFLOW_LEASE_LOST_MESSAGE);
+        result.errors.push(workflowPersistenceError ?? WORKFLOW_LEASE_LOST_MESSAGE);
         break;
       }
       if (workflowPersistenceError) {
@@ -3277,6 +3313,21 @@ async function executeQueuedNodeActions(
               return {
                 action,
           failed: "旁白节点缺少上游生成的文本，已停止提交 TTS 请求；请先完成剧本/Beat 文本生成后重试。", // i18n-exempt -- workflow error payload
+                retryCount,
+              };
+            }
+
+            // Tail-frame capture and input hydration await, and the page may have
+            // been frozen past the lease meanwhile. Wait for a server-confirmed
+            // status (queued behind any in-flight heartbeat) before dispatch; a
+            // failed confirmation is not a confirmation, so it blocks dispatch too.
+            await confirmWorkflowRunActive();
+            if (workflowLeaseLost || workflowPersistenceError || workflowCancelled()) {
+              return {
+                action,
+                failed: workflowCancelled()
+                  ? WORKFLOW_STOPPED_MESSAGE
+                  : workflowPersistenceError ?? WORKFLOW_LEASE_LOST_MESSAGE,
                 retryCount,
               };
             }
