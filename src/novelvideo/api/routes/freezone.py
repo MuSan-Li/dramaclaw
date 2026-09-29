@@ -138,7 +138,7 @@ from novelvideo.freezone.asset_copy import (
     parse_project_asset_url,
     resolve_source_file,
 )
-from novelvideo.i18n_message import log_lines_text
+from novelvideo.i18n_message import lmsg, log_lines_text
 from novelvideo.media_model_request_schema import (
     MediaModelSchemaError,
     media_request_schema_for_mode,
@@ -15217,7 +15217,10 @@ async def _settle_failed_agent_product_task(
             0,
             scope=operation_id,
             error=error,
-            current_task="Agent 交付工作流草稿失败",
+            current_task=lmsg(
+                "tasks.progress.workflowDraftDeliveryFailed",
+                "Agent 交付工作流草稿失败",
+            ),
             metadata={
                 "operation_status": "failed",
                 "settlement_status": "failed",
