@@ -14608,6 +14608,15 @@ async def create_canvas_workflow_draft(
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+    logger.info(
+        "workflow_draft.create.start project_id=%s canvas_id=%s operation_id=%s "
+        "operation_status=%s operation_task_id=%s",
+        ctx.project_id,
+        canvas_id,
+        operation_id or "unmetered",
+        str((operation or {}).get("status") or "none"),
+        str((operation or {}).get("task_id") or "none"),
+    )
     if operation_id and operation is not None and operation.get("product_kind") != "workflow_result":
         actual_product_kind = str(operation.get("product_kind") or "")
         raise HTTPException(
@@ -14620,6 +14629,14 @@ async def create_canvas_workflow_draft(
     if operation_id and operation is None:
         raise HTTPException(400, "workflow result operation is unavailable")
     if operation is not None:
+        operation_canvas_id = str(operation.get("canvas_id") or "").strip()
+        if operation_canvas_id != canvas_id:
+            raise HTTPException(
+                400,
+                "workflow result operation does not match target canvas: "
+                f"operation.canvas_id={operation_canvas_id!r}, "
+                f"expected canvas_id={canvas_id!r}",
+            )
         compiled = body.get("compiled") if isinstance(body.get("compiled"), dict) else {}
         intent = body.get("intent") if isinstance(body.get("intent"), dict) else {}
         plan = body.get("plan", intent.get("plan", compiled.get("plan")))
@@ -14631,17 +14648,25 @@ async def create_canvas_workflow_draft(
         operation_skill_id = str(
             (operation.get("metadata") or {}).get("skill_id") or ""
         ).strip()
+        operation_skill_version = str(
+            (operation.get("metadata") or {}).get("skill_version") or ""
+        ).strip()
         artifact_id = str(operation.get("artifact_id") or "").strip()
-        artifact_skill_id = artifact_id.split("@", 1)[0]
+        artifact_skill_id, separator, artifact_skill_version = artifact_id.partition("@")
+        artifact_skill_id = artifact_skill_id.strip()
+        artifact_skill_version = artifact_skill_version.strip() if separator else ""
         if (
             not compiled_skill_id
             or operation_skill_id != compiled_skill_id
             or artifact_skill_id != compiled_skill_id
+            or not operation_skill_version
+            or operation_skill_version != artifact_skill_version
         ):
             raise HTTPException(
                 400,
                 "workflow result operation does not match compiled Skill: "
                 f"operation.skill_id={operation_skill_id!r}, "
+                f"operation.skill_version={operation_skill_version!r}, "
                 f"operation.artifact_id={artifact_id!r}, "
                 f"expected skill_id={compiled_skill_id!r}",
             )
@@ -14675,6 +14700,14 @@ async def create_canvas_workflow_draft(
         raise HTTPException(409, "workflow result operation is not admitted")
     if operation and not (operation.get("model_evidence") or {}).get("model_call_id"):
         evidence_metrics.observe("agent_product_evidence_rejected")
+        logger.warning(
+            "workflow_draft.create.rejected project_id=%s canvas_id=%s "
+            "operation_id=%s reason=model_evidence_missing operation_status=%s",
+            ctx.project_id,
+            canvas_id,
+            operation_id,
+            str(operation.get("status") or ""),
+        )
         raise HTTPException(
             409,
             "workflow result has no server-observed model execution evidence",
@@ -14687,12 +14720,37 @@ async def create_canvas_workflow_draft(
     validated["preflight"] = await _check_workflow_runtime(
         validated, project=project, user=user
     )
+    plan = validated.get("plan") if isinstance(validated.get("plan"), dict) else {}
+    logger.info(
+        "workflow_draft.create.validated project_id=%s canvas_id=%s operation_id=%s "
+        "skill_id=%s node_count=%d edge_count=%d",
+        ctx.project_id,
+        canvas_id,
+        operation_id or "unmetered",
+        str(validated.get("skill_id") or ""),
+        len(plan.get("nodes") or []),
+        len(plan.get("edges") or []),
+    )
     if isinstance(prepared["intent"].get("plan"), dict):
         prepared["intent"]["plan"] = deepcopy(validated["plan"])
-    if operation is not None and validated.get("skill_id") != compiled_skill_id:
-        raise HTTPException(
-            400, "workflow result operation does not match compiled Skill"
+    if operation is not None:
+        validated_skill = (
+            validated.get("plan", {}).get("skill")
+            if isinstance(validated.get("plan"), dict)
+            and isinstance(validated.get("plan", {}).get("skill"), dict)
+            else {}
         )
+        validated_skill_version = str(validated_skill.get("version") or "").strip()
+        if (
+            validated.get("skill_id") != compiled_skill_id
+            or (
+                validated_skill_version
+                and validated_skill_version != operation_skill_version
+            )
+        ):
+            raise HTTPException(
+                400, "workflow result operation does not match compiled Skill identity"
+            )
     try:
         await asyncio.to_thread(
             prune_expired_workflow_drafts,
@@ -14710,13 +14768,27 @@ async def create_canvas_workflow_draft(
             operation_id=operation_id,
         )
     except ValueError as exc:
+        logger.warning(
+            "workflow_draft.create.failed project_id=%s canvas_id=%s "
+            "operation_id=%s phase=persist error_type=%s error=%s",
+            ctx.project_id,
+            canvas_id,
+            operation_id or "unmetered",
+            type(exc).__name__,
+            str(exc)[:240],
+        )
         if operation is not None:
-            await asyncio.to_thread(
+            operation = await asyncio.to_thread(
                 finish_agent_product_operation,
                 project_dir=state_dir,
                 operation_id=operation_id,
                 outcome="failed",
                 expected_task_id=str(operation.get("task_id") or ""),
+            )
+            await _settle_failed_agent_product_task(
+                ctx=ctx,
+                operation=operation,
+                error=str(exc),
             )
         raise HTTPException(400, str(exc)) from exc
     if operation is not None:
@@ -14734,6 +14806,16 @@ async def create_canvas_workflow_draft(
             },
         )
         await _settle_delivered_agent_product_task(ctx=ctx, operation=operation)
+    logger.info(
+        "workflow_draft.create.delivered project_id=%s canvas_id=%s operation_id=%s "
+        "draft_id=%s revision=%s operation_status=%s",
+        ctx.project_id,
+        canvas_id,
+        operation_id or "unmetered",
+        str(draft.get("draft_id") or ""),
+        str(draft.get("revision") or ""),
+        str((operation or {}).get("status") or "unmetered"),
+    )
     return {
         "ok": True,
         "data": _workflow_draft_api_data(
@@ -15077,7 +15159,7 @@ async def _settle_delivered_agent_product_task(
                 "delivered agent product credit confirmation unavailable"
             )
     if (
-        task.status == "failed"
+        task.status in {"failed", "running"}
         and metadata.get("error_code") == "AGENT_PRODUCT_SETTLEMENT_PENDING"
     ):
         completed = manager.complete_task_for_project(
@@ -15102,6 +15184,46 @@ async def _settle_delivered_agent_product_task(
             if current is None or current.task_id != expected_task_id or current.status != "completed":
                 raise RuntimeError("delivered agent product task did not reconcile")
         evidence_metrics.observe("agent_product_reconciled")
+
+
+async def _settle_failed_agent_product_task(
+    *, ctx: ProjectContext, operation: dict[str, Any], error: str
+) -> None:
+    """Terminalize a waiting workflow-result task after definitive delivery failure."""
+    if operation.get("status") != "failed":
+        return
+    task_type = str(operation.get("task_type") or "")
+    operation_id = str(operation.get("operation_id") or "")
+    expected_task_id = str(operation.get("task_id") or "")
+    if (
+        operation.get("project_id") != ctx.project_id
+        or PRODUCT_TASK_TYPES.get(operation.get("product_kind")) != task_type
+        or not operation_id
+        or not expected_task_id
+    ):
+        return
+    manager = get_task_manager()
+    task = manager.get_task_for_project(ctx, task_type, 0, scope=operation_id)
+    if task is None or task.task_id != expected_task_id:
+        return
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    if (
+        task.status == "running"
+        and metadata.get("error_code") == "AGENT_PRODUCT_SETTLEMENT_PENDING"
+    ):
+        manager.fail_task_for_project(
+            ctx,
+            task_type,
+            0,
+            scope=operation_id,
+            error=error,
+            current_task="Agent 交付工作流草稿失败",
+            metadata={
+                "operation_status": "failed",
+                "settlement_status": "failed",
+            },
+            expected_task_id=expected_task_id,
+        )
 
 
 _RECIPE_SETTLEMENT_RETRY_DELAYS = (1, 5, 15)
