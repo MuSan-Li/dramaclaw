@@ -33,6 +33,7 @@ import {
 } from "@/features/canvas/application/nodeActionResult";
 import {
   createFreezoneWorkflowRun,
+  getFreezoneWorkflowRun,
   updateFreezoneWorkflowRun,
   type FreezonePresetCanvasRequest,
   type FreezoneWorkflowRun,
@@ -221,7 +222,7 @@ export type CanvasChatCommandApplyResult = {
 export type CanvasChatCommandApplyStep = {
   commandIndex: number;
   type: CanvasChatCommand["type"] | "validate";
-  status: "success" | "error";
+  status: "success" | "pending" | "error";
   label: string;
   nodeId?: string;
   action?: string;
@@ -518,8 +519,7 @@ const WORKFLOW_ACTION_CONCURRENCY = 3;
 const WORKFLOW_ACTION_MAX_RETRIES = 2;
 const WORKFLOW_STOPPED_MESSAGE = "工作流已停止，未启动后续节点。";
 const WORKFLOW_LEASE_LOST_MESSAGE = "工作流执行租约已失效，已停止启动后续节点。"; // i18n-exempt
-const TERMINAL_WORKFLOW_RUN_STATUSES = new Set<string>([
-  "completed",
+const STOPPED_WORKFLOW_RUN_STATUSES = new Set<string>([
   "failed",
   "cancelled",
   "interrupted",
@@ -2824,6 +2824,8 @@ async function executeQueuedNodeActions(
         ? `canvas-runner:${crypto.randomUUID()}`
         : `canvas-runner:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
     let workflowLeaseLost = false;
+    let workflowServerCompleted = false;
+    let workflowServerReconciliationPending = false;
     let workflowPersistenceError: string | null = null;
     let workflowHeartbeat: ReturnType<typeof setInterval> | null = null;
     let workflowHeartbeatQueue: Promise<void> = Promise.resolve();
@@ -2847,7 +2849,11 @@ async function executeQueuedNodeActions(
     // runner must read the status back instead of treating 200 as a renewed
     // lease (issue #730).
     const observeWorkflowRunStatus = (run: FreezoneWorkflowRun) => {
-      if (!TERMINAL_WORKFLOW_RUN_STATUSES.has(run.status)) return;
+      if (run.status === "completed") {
+        workflowServerCompleted = true;
+        return;
+      }
+      if (!STOPPED_WORKFLOW_RUN_STATUSES.has(run.status)) return;
       workflowLeaseLost = true;
       workflowPersistenceError = workflowRunEndedMessage(run.status);
     };
@@ -2992,15 +2998,29 @@ async function executeQueuedNodeActions(
               ...(status ? { status } : {}),
               runner_id: workflowRunnerId,
             });
-            if (!status) observeWorkflowRunStatus(updatedRun);
+            let confirmedRun = updatedRun;
+            if (status === "completed" && updatedRun.status === "running") {
+              // PATCH records browser progress; GET also reconciles durable task artifacts.
+              confirmedRun = await getFreezoneWorkflowRun(projectId, canvasId, runId, 10);
+            }
+            observeWorkflowRunStatus(confirmedRun);
+            if (status === "completed") {
+              workflowServerReconciliationPending = confirmedRun.status === "running";
+            }
+            if (status && confirmedRun.status !== status
+              && !(status === "completed" && confirmedRun.status === "running")
+              && !workflowPersistenceError) {
+              workflowPersistenceError =
+                `工作流最终状态未确认（请求 ${status}，服务端返回 ${confirmedRun.status}）。`;
+            }
             if (typeof window !== "undefined") {
               window.dispatchEvent(new CustomEvent(FREEZONE_WORKFLOW_RUN_UPDATED_EVENT, {
                 detail: {
                   projectId,
                   canvasId,
                   runId,
-                  status: updatedRun.status,
-                  run: updatedRun,
+                  status: confirmedRun.status,
+                  run: confirmedRun,
                 },
               }));
             }
@@ -3109,6 +3129,26 @@ async function executeQueuedNodeActions(
     }
     const generationActions = pendingActions.filter((action) =>
       GENERATION_NODE_ACTIONS.has(action.action));
+    const completedServerActionOutcome = (action: PendingNodeAction, retryCount: number) => {
+      const output = generatedResultOutputFromNode(action.nodeId, action.action);
+      if (
+        action.action !== "run_skill" &&
+        GENERATION_NODE_ACTIONS.has(action.action) &&
+        (!hasGeneratedResult(action.nodeId, action.action) || !output)
+      ) {
+        return { action, failed: null, pending: true, retryCount };
+      }
+      return {
+        action,
+        failed: null,
+        output: {
+          skipped: true,
+          reason: "workflow_run_already_completed",
+          ...(output ?? {}),
+        },
+        retryCount,
+      };
+    };
     const generationCountByLane = generationActions.reduce<Record<WorkflowActionLane, number>>(
       (counts, action) => {
         const lane = workflowActionLane(action.action);
@@ -3254,7 +3294,7 @@ async function executeQueuedNodeActions(
                 projectId,
                 lane,
                 options.actionTimeoutMs ?? DEFAULT_NODE_ACTION_TIMEOUT_MS,
-                () => workflowLeaseLost || workflowCancelled(),
+                () => workflowLeaseLost || workflowServerCompleted || workflowCancelled(),
                 () => {
                   void persistRunUpdate([{
                     node_id: action.nodeId,
@@ -3265,6 +3305,9 @@ async function executeQueuedNodeActions(
                 },
               );
               if (!capacityReady) {
+                if (workflowServerCompleted) {
+                  return completedServerActionOutcome(action, retryCount);
+                }
                 return {
                   action,
                   failed: workflowCancelled()
@@ -3290,6 +3333,10 @@ async function executeQueuedNodeActions(
               phase: "preparing",
               retry_count: retryCount,
             }]);
+
+            if (workflowServerCompleted) {
+              return completedServerActionOutcome(action, retryCount);
+            }
 
             if (action.action === "generate_html") {
               if (!projectId || !options.canvasId) return {action,failed:"HTML generation requires an active project and canvas"};
@@ -3322,6 +3369,9 @@ async function executeQueuedNodeActions(
             // status (queued behind any in-flight heartbeat) before dispatch; a
             // failed confirmation is not a confirmation, so it blocks dispatch too.
             await confirmWorkflowRunActive();
+            if (workflowServerCompleted) {
+              return completedServerActionOutcome(action, retryCount);
+            }
             if (workflowLeaseLost || workflowPersistenceError || workflowCancelled()) {
               return {
                 action,
@@ -3574,24 +3624,41 @@ async function executeQueuedNodeActions(
           releaseActionSlot();
         }
         })();
-        await persistRunUpdate([{
-          node_id: settled.action.nodeId,
-          action: settled.action.action,
-          status: settled.failed
-            ? settled.failed === WORKFLOW_STOPPED_MESSAGE
-              ? "skipped"
-              : settled.failed.startsWith("跳过 ") ? "blocked" : "failed"
-            : isRecord(settled.output) && settled.output.skipped === true
-              ? "skipped"
-              : "completed",
-          ...(settled.failed ? { error: settled.failed } : {}),
-          retry_count: settled.retryCount ?? 0,
-          ...workflowTaskReference(settled.output),
-        }]);
+        if (!("pending" in settled && settled.pending)) {
+          await persistRunUpdate([{
+            node_id: settled.action.nodeId,
+            action: settled.action.action,
+            status: settled.failed
+              ? settled.failed === WORKFLOW_STOPPED_MESSAGE
+                ? "skipped"
+                : settled.failed.startsWith("跳过 ") ? "blocked" : "failed"
+              : isRecord(settled.output) && settled.output.skipped === true
+                ? "skipped"
+                : "completed",
+            ...(settled.failed ? { error: settled.failed } : {}),
+            retry_count: settled.retryCount ?? 0,
+            ...workflowTaskReference(settled.output),
+          }]);
+        }
         return settled;
       }));
 
-      for (const { action, failed, output } of levelResults) {
+      for (const settled of levelResults) {
+        const { action, failed, output } = settled;
+        if ("pending" in settled && settled.pending) {
+          result.commandResults.push({
+            commandIndex: action.commandIndex,
+            type: "run_node_action",
+            status: "pending",
+            label: `${action.label}（${i18next.t("freezone.chat.workflowOutputSyncPendingLabel", {
+              defaultValue: "产物待同步",
+            })}）`,
+            nodeId: action.nodeId,
+            action: action.action,
+            output: { pending: true, reason: "workflow_result_sync_pending" },
+          });
+          continue;
+        }
         if (failed === WORKFLOW_STOPPED_MESSAGE) {
           runCancelled = true;
           continue;
@@ -3637,6 +3704,15 @@ async function executeQueuedNodeActions(
         [],
         runCancelled ? "cancelled" : runFailed || blockedNodeIds.size > 0 ? "failed" : "completed",
       );
+      if (workflowServerReconciliationPending) {
+        for (const step of result.commandResults) {
+          if (step.type !== "run_node_action" || step.status !== "success") continue;
+          if (!pendingActions.some((action) => action.nodeId === step.nodeId && action.action === step.action)) continue;
+          step.status = "pending";
+          step.output = { pending: true, reason: "workflow_server_reconciliation_pending" };
+          result.openedUiActions = Math.max(0, result.openedUiActions - 1);
+        }
+      }
     } catch (error) {
       if (!workflowPersistenceError) throw error;
       runFailed = true;
