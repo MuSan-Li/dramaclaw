@@ -40,6 +40,17 @@ Build one coherent workflow transaction, not a sequence of standalone canvas edi
   `freezone_create_edge`, `freezone_group_nodes`, or other single-operation tools.
 - Never fall back to repeated single-operation writes after a workflow validation or schema error.
   Correct the workflow intent/plan or report the blocking error.
+- Never resubmit an unchanged workflow payload. After one correction, if the same validation path
+  fails again in the same turn, stop retrying and report that blocker instead of increasing the
+  failure counter.
+- Treat the Workflow Intent schema as the serialization allowlist. Recipe discovery fields such as
+  `requires_source_media` are selection metadata only: use them to choose and connect Recipes, but
+  never copy them into `intent.items[]`. The server derives authoritative Recipe constraints from
+  `recipe_id`.
+- For `short-drama-quick`, preserve screenplay-first planning: when narration/dialogue will be
+  produced by an upstream shot/script Recipe, keep the `drama-shot-voice` item and reference that
+  text item. Do not invent literal narration at draft time, and never delete requested voiceover
+  merely to pass validation; the runtime resolves the spoken text through the `prompt_for` edge.
 - A failure from an earlier chat turn is diagnostic history, not proof that the current adapter is
   still blocked. When the user repeats the original create/run request, explicitly asks to retry,
   or has restarted the service, retry the same complete workflow write once in the current turn.
@@ -186,7 +197,13 @@ Route between the normal draft flow and the exact topology path in this priority
 2. Otherwise, when the user explicitly names required nodes and their dependency order that
    deviate from the matching Skill's template, use the exact topology path in
    [references/custom-topology.md](references/custom-topology.md), preparing the complete Plan as
-   a persisted draft even when a production Skill also matches.
+   a persisted draft even when a production Skill also matches. The Plan must include top-level
+   `schema_version` and `skill.id`/`skill.version` copied from the selected production Skill;
+   `generation_answers` never substitutes for the complete Plan.
+   Episode totals, Beat totals, shot totals, duration, and other business counts alone do not enter
+   this path. Keep them in compact Intent inputs or the standard planner. Only treat them as exact
+   topology when the user explicitly requires those items to exist as individual canvas nodes and
+   specifies a dependency graph that differs from the standard template.
 3. When an explicit planner instruction and the listed topology genuinely conflict (for example
    the standard planner is named but a mandatory template stage is dropped), ask one
    single-question clarification with `freezone_request_user_clarification` before choosing a

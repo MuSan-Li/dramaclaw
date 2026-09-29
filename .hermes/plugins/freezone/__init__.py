@@ -91,6 +91,7 @@ _JSON_WORKFLOW_CATALOG_IMPORT_ERROR: Exception | None = None
 try:
     from novelvideo.freezone.agent_workflows.catalog import (
         _recipe_node_type,
+        canonical_recipe_stage,
         compile_workflow_intent,
         get_workflow_skill,
         validate_agent_workflow_plan,
@@ -98,6 +99,7 @@ try:
 except Exception as exc:
     _JSON_WORKFLOW_CATALOG_IMPORT_ERROR = exc
     _recipe_node_type = None
+    canonical_recipe_stage = None
     compile_workflow_intent = None
     get_workflow_skill = None
     validate_agent_workflow_plan = None
@@ -5518,6 +5520,13 @@ def _handle_prepare_workflow_plan_draft(args: dict[str, Any], **_: Any) -> str:
         _apply_generation_choices_to_plan(source_plan, choices)
     validated = validate_agent_workflow_plan(source_plan)
     if not validated.get("ok"):
+        # One model turn can submit two plan variants concurrently under the
+        # same admitted operation. Once either variant has delivered a durable
+        # draft, every duplicate must converge on that receipt instead of
+        # reporting a contradictory validation failure.
+        delivered = _delivered_workflow_draft_for_operation(args)
+        if delivered is not None:
+            return tool_result(delivered)
         return tool_result(validated)
     project, canvas, scope_error = _workflow_draft_scope(args)
     if scope_error:
@@ -5585,6 +5594,48 @@ def _handle_prepare_workflow_plan_draft(args: dict[str, Any], **_: Any) -> str:
         "fall back to direct canvas commands."
     )
     return tool_result(result)
+
+
+def _delivered_workflow_draft_for_operation(
+    args: dict[str, Any],
+) -> dict[str, Any] | None:
+    operation_id = str(args.get("operation_id") or "").strip()
+    project_id, canvas_id, scope_error = _workflow_draft_scope(args)
+    if not operation_id or scope_error or project_id is None or canvas_id is None:
+        return None
+    operation_response = _request(
+        "GET",
+        _agent_product_operation_api_path(project_id, operation_id),
+    )
+    operation = (
+        operation_response.get("data")
+        if isinstance(operation_response.get("data"), dict)
+        else None
+    )
+    if (
+        operation is None
+        or operation.get("status") != "delivered"
+        or operation.get("product_kind") != "workflow_result"
+    ):
+        return None
+    result_ref = (
+        operation.get("result_ref")
+        if isinstance(operation.get("result_ref"), dict)
+        else {}
+    )
+    draft_id = str(result_ref.get("id") or "").strip()
+    if result_ref.get("kind") != "workflow_draft" or not draft_id:
+        return None
+    payload, _error = _workflow_draft_response(
+        _request(
+            "GET",
+            _workflow_draft_api_path(project_id, canvas_id, draft_id),
+            query={"view": "summary"},
+        )
+    )
+    if payload is None:
+        return None
+    return public_workflow_draft(payload)
 
 
 def _workflow_draft_dependencies_available() -> bool:
@@ -6007,24 +6058,185 @@ def _handle_workflow_operation(args: dict[str, Any], *, action: str) -> str:
             }
         )
     request_args = args
-    if action == "prepare" and "generation_answers" in args:
-        choices, answers_error = _generation_choices_from_answers(
-            args["generation_answers"], plan=args.get("plan")
-        )
-        if answers_error is not None:
-            return tool_result(answers_error)
-        request_args = dict(args)
-        if isinstance(args.get("intent"), dict) and "plan" not in args:
-            intent = _clone_json(args["intent"])
+    generation_choices: dict[str, Any] | None = None
+    if action == "prepare":
+        has_intent = isinstance(args.get("intent"), dict)
+        has_plan = isinstance(args.get("plan"), dict)
+        if has_intent == has_plan:
+            return tool_result(
+                {
+                    "ok": False,
+                    "status": "workflow_source_required",
+                    "error": (
+                        "Provide exactly one complete intent or plan; "
+                        "generation_answers only supplements it"
+                    ),
+                    "errors": [
+                        {
+                            "path": "intent|plan",
+                            "message": "exactly one complete workflow source is required",
+                        }
+                    ],
+                    "retryable": False,
+                    "next_action": "submit_complete_workflow_source",
+                }
+            )
+        if "generation_answers" in args:
+            generation_choices, answers_error = _generation_choices_from_answers(
+                args["generation_answers"], plan=args.get("plan")
+            )
+            if answers_error is not None:
+                return tool_result(answers_error)
+        if has_plan:
+            plan = _clone_json(args["plan"])
+            plan.setdefault("schema_version", "freezone_workflow_plan.v1")
+            skill = plan.get("skill") if isinstance(plan.get("skill"), dict) else {}
+            skill = dict(skill)
+            operation_id = str(args.get("operation_id") or "").strip()
+            inferred_id = ""
+            inferred_version = ""
+            if operation_id:
+                operation_response = _request(
+                    "GET", _agent_product_operation_api_path(project_id, operation_id)
+                )
+                operation = (
+                    operation_response.get("data")
+                    if isinstance(operation_response.get("data"), dict)
+                    else {}
+                )
+                operation_canvas_id = str(operation.get("canvas_id") or "").strip()
+                if (
+                    operation.get("product_kind") != "workflow_result"
+                    or operation_canvas_id != canvas_id
+                ):
+                    return tool_result(
+                        {
+                            "ok": False,
+                            "status": "workflow_result_operation_scope_mismatch",
+                            "error": (
+                                "The admitted workflow_result operation does not belong "
+                                "to this project canvas"
+                            ),
+                            "retryable": False,
+                            "next_action": "begin_workflow_result_generation",
+                        }
+                    )
+                metadata = (
+                    operation.get("metadata")
+                    if isinstance(operation.get("metadata"), dict)
+                    else {}
+                )
+                artifact_id = str(operation.get("artifact_id") or "").strip()
+                artifact_skill_id, separator, artifact_version = artifact_id.partition("@")
+                metadata_skill_id = str(metadata.get("skill_id") or "").strip()
+                metadata_version = str(metadata.get("skill_version") or "").strip()
+                artifact_skill_id = artifact_skill_id.strip()
+                artifact_version = artifact_version.strip() if separator else ""
+                identity_conflict = (
+                    metadata_skill_id
+                    and artifact_skill_id
+                    and metadata_skill_id != artifact_skill_id
+                ) or (
+                    metadata_version
+                    and artifact_version
+                    and metadata_version != artifact_version
+                )
+                if identity_conflict:
+                    return tool_result(
+                        {
+                            "ok": False,
+                            "status": "workflow_result_skill_identity_mismatch",
+                            "error": "The admitted operation contains conflicting Skill identity",
+                            "retryable": False,
+                            "next_action": "begin_workflow_result_generation",
+                        }
+                    )
+                inferred_id = metadata_skill_id or artifact_skill_id
+                inferred_version = metadata_version or artifact_version
+            explicit_id = str(skill.get("id") or "").strip()
+            explicit_version = str(skill.get("version") or "").strip()
+            if (explicit_id and inferred_id and explicit_id != inferred_id) or (
+                explicit_version
+                and inferred_version
+                and explicit_version != inferred_version
+            ):
+                return tool_result(
+                    {
+                        "ok": False,
+                        "status": "workflow_result_skill_identity_mismatch",
+                        "error": "The Plan Skill identity conflicts with the admitted operation",
+                        "retryable": False,
+                        "next_action": "submit_complete_workflow_plan",
+                    }
+                )
+            if not explicit_id and inferred_id:
+                skill["id"] = inferred_id
+            if not explicit_version and inferred_version:
+                skill["version"] = inferred_version
+            missing_identity = (
+                ["plan.skill.id"] if not str(skill.get("id") or "").strip() else []
+            )
+            if missing_identity:
+                return tool_result(
+                    {
+                        "ok": False,
+                        "status": "workflow_plan_identity_required",
+                        "error": (
+                            "Workflow Plan identity could not be recovered from "
+                            "the admitted operation"
+                        ),
+                        "errors": [
+                            {"path": field, "message": "field is required"}
+                            for field in missing_identity
+                        ],
+                        "retryable": False,
+                        "next_action": "submit_complete_workflow_plan",
+                    }
+                )
+            plan["skill"] = skill
+            for node in plan.get("nodes") or []:
+                if not isinstance(node, dict) or node.get("node_type") != "textAnnotationNode":
+                    continue
+                data = node.get("data") if isinstance(node.get("data"), dict) else {}
+                catalog = (
+                    data.get("workflowCatalog")
+                    if isinstance(data.get("workflowCatalog"), dict)
+                    else {}
+                )
+                if not str(catalog.get("recipeId") or "").strip():
+                    continue
+                reserved_stage = (
+                    node.get("stage") in {"input", "resource", "asset"}
+                    or data.get("stage") in {"input", "resource", "asset"}
+                )
+                if reserved_stage:
+                    canonical_stage = (
+                        canonical_recipe_stage(
+                            str(skill.get("id") or "").strip(),
+                            str(catalog.get("recipeId") or "").strip(),
+                        )
+                        if canonical_recipe_stage is not None
+                        else ""
+                    )
+                    node.pop("stage", None)
+                    data.pop("stage", None)
+                    if canonical_stage:
+                        node["stage"] = canonical_stage
+            request_args = dict(args)
+            request_args["plan"] = plan
+    if action == "prepare" and generation_choices is not None:
+        request_args = dict(request_args)
+        if isinstance(request_args.get("intent"), dict) and "plan" not in request_args:
+            intent = _clone_json(request_args["intent"])
             current_inputs = intent.get("inputs")
             intent["inputs"] = {
                 **(current_inputs if isinstance(current_inputs, dict) else {}),
-                **choices,
+                **generation_choices,
             }
             request_args["intent"] = intent
-        elif isinstance(args.get("plan"), dict) and "intent" not in args:
-            plan = _clone_json(args["plan"])
-            _apply_generation_choices_to_plan(plan, choices)
+        elif isinstance(request_args.get("plan"), dict) and "intent" not in request_args:
+            plan = _clone_json(request_args["plan"])
+            _apply_generation_choices_to_plan(plan, generation_choices)
             request_args["plan"] = plan
         else:
             return tool_result({
@@ -8339,8 +8551,6 @@ def _schema(
         "required": required or [],
     }
     parameters["additionalProperties"] = not reject_unknown
-    if name == "freezone_prepare_workflow":
-        parameters["oneOf"] = [{"required": ["intent"]}, {"required": ["plan"]}]
     return {
         "name": name,
         "description": description,
@@ -8571,7 +8781,7 @@ _WORKFLOW_INTENT_OBJECT_SCHEMA = {
                     "type": "string",
                     "enum": ["images", "video", "mixed"],
                 },
-                "item_count": {"type": "integer", "minimum": 1, "maximum": 12},
+                "item_count": {"type": "integer", "minimum": 1, "maximum": 25},
                 "total_duration_seconds": {
                     "type": "integer",
                     "minimum": 1,
@@ -8584,7 +8794,7 @@ _WORKFLOW_INTENT_OBJECT_SCHEMA = {
                 "include_audio": {"type": "boolean"},
                 "units": {
                     "type": "array",
-                    "maxItems": 12,
+                    "maxItems": 25,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -8692,6 +8902,11 @@ if workflow_plan_json_schema is not None:
     _WORKFLOW_PLAN_OBJECT_SCHEMA = workflow_plan_json_schema()
 if workflow_intent_json_schema is not None:
     _WORKFLOW_INTENT_OBJECT_SCHEMA = workflow_intent_json_schema()
+
+# The persisted Plan contract remains strict, while this prepare-tool boundary
+# accepts identity fields that can be recovered from the admitted operation.
+_WORKFLOW_PREPARE_PLAN_OBJECT_SCHEMA = deepcopy(_WORKFLOW_PLAN_OBJECT_SCHEMA)
+_WORKFLOW_PREPARE_PLAN_OBJECT_SCHEMA["required"] = ["nodes", "edges"]
 
 _WORKFLOW_BINDINGS_SCHEMA = {
     "type": "array",
@@ -10238,7 +10453,7 @@ TOOLS = (
             {
                 **_SCOPE_PROPS,
                 "intent": _WORKFLOW_INTENT_OBJECT_SCHEMA,
-                "plan": _WORKFLOW_PLAN_OBJECT_SCHEMA,
+                "plan": _WORKFLOW_PREPARE_PLAN_OBJECT_SCHEMA,
                 "generation_answers": {
                     "type": "object",
                     "description": "Pass the clarification result's answers field itself (generation_answers = result['answers']), not the whole result. A receipt envelope with answers and generation_choices is also accepted. The server maps answers into the selected intent or plan.",

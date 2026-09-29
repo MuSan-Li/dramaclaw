@@ -251,9 +251,16 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
     "sequence. When the user explicitly specifies exact nodes and dependencies, follow the Skill's "
     "custom-topology reference and call freezone_prepare_workflow_plan_draft once instead; do not "
     "route that request through the compact Intent compiler merely because a "
-    "production Skill matches. Explicit Beat, shot, node-count, or dependency requirements must "
-    "remain one complete WorkflowPlan even when they exceed the compact planner limit. Copy exact "
-    "user totals into expected_node_count and expected_node_counts. For episodic short-drama, Beat, "
+    "production Skill matches. Beat counts, shot counts, episode counts, and other business totals "
+    "belong in the compact Intent or standard planner inputs and must not by themselves trigger an "
+    "agent-authored Plan. Use a complete WorkflowPlan only when the user explicitly enumerates "
+    "canvas nodes and a dependency graph that deviates from the selected Skill's standard topology; "
+    "then copy exact user node totals into expected_node_count and expected_node_counts. Every "
+    "complete Plan must carry "
+    "top-level schema_version plus skill.id and skill.version copied from the selected production "
+    "Skill; generation_answers supplements that Plan and never replaces it. On recipe-backed text "
+    "nodes, never use the reserved input/resource/asset stages, which identify recipe-less user "
+    "resources. For episodic short-drama, Beat, "
     "voice-over, or background-music workflows, prefer the short-drama production Skill over the "
     "generic text-to-image-video Skill. After any validation error, never submit a reduced sample, "
     "smoke test, or placeholder graph such as A/B or T1/T2 to the real canvas; diagnose with the "
@@ -369,7 +376,7 @@ _CODEX_FREEZONE_DEVELOPER_INSTRUCTIONS = (
 # Freezone browser-bridge contract changes so a turn cannot silently resume a
 # thread with incompatible tool definitions.
 _CODEX_THREAD_PROTOCOL_VERSION = "tool-discovery-v2"
-_CODEX_FREEZONE_THREAD_PROTOCOL_VERSION = "canvas-workflows-v24"
+_CODEX_FREEZONE_THREAD_PROTOCOL_VERSION = "canvas-workflows-v26"
 
 
 def _codex_developer_instructions(tool_mode: str | None) -> str:
@@ -585,8 +592,14 @@ Canvas write contract:
   references/custom-topology.md and call freezone_prepare_workflow_plan_draft once with one complete
   freezone_workflow_plan.v1. Exact means the user names the nodes and their dependency order; do not
   route it through the normal draft flow or compact Intent compiler merely because a production
-  Skill matches. Explicit Beat, shot, or node totals must be copied into expected_node_count and
-  expected_node_counts and must remain unchanged during recovery. Episodic short-drama, Beat,
+  Skill matches. The Plan must include top-level schema_version plus skill.id and skill.version
+  copied from the selected production Skill; generation_answers supplements the complete Plan and
+  never replaces it. Recipe-backed text nodes must not use the reserved input/resource/asset stages,
+  which identify recipe-less user resources. Beat counts, shot counts, episode counts, and other
+  business totals stay in compact Intent or standard-planner inputs and do not by themselves require
+  a raw Plan. Only explicit canvas nodes plus a nonstandard dependency graph take the exact-topology
+  path; on that path, copy exact node totals into expected_node_count and expected_node_counts and
+  keep them unchanged during recovery. Episodic short-drama, Beat,
   voice-over, or background-music workflows should use the short-drama production Skill rather than
   the generic text-to-image-video Skill.
   Graph completeness is the Agent's responsibility. Before submission, verify that all Plan nodes

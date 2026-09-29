@@ -510,6 +510,11 @@ def test_freezone_plugin_registers_canvas_command_tools():
     }
     assert intent_inputs["properties"]["video_duration_seconds"]["type"] == "number"
     assert intent_inputs["properties"]["video_generate_audio"] == {"type": "boolean"}
+    intent_item = prepare_draft_schema["properties"]["intent"]["properties"][
+        "items"
+    ]["items"]
+    assert intent_item["additionalProperties"] is False
+    assert "requires_source_media" not in intent_item["properties"]
     patch_draft_schema = schemas["freezone_patch_workflow_draft"]["parameters"]
     assert patch_draft_schema["required"] == [
         "draft_id",
@@ -1042,6 +1047,60 @@ def test_dynamic_workflow_plan_is_rejected_before_canvas_bridge():
     assert result["ok"] is False
     assert result["status"] == "invalid_dynamic_workflow_plan"
     assert result["errors"][0]["path"] == "nodes[0].node_type"
+
+
+def test_duplicate_invalid_plan_reuses_delivered_operation_draft(monkeypatch):
+    plugin = _load_plugin_module()
+    calls = []
+    monkeypatch.setattr(
+        plugin,
+        "validate_agent_workflow_plan",
+        lambda _plan: {
+            "ok": False,
+            "status": "invalid_dynamic_workflow_plan",
+            "error": "aggregate workflow planning text exceeds 4000 characters",
+        },
+    )
+    monkeypatch.setattr(plugin, "public_workflow_draft", lambda payload: payload)
+
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        if "/agent-product-operations/" in path:
+            return {
+                "ok": True,
+                "data": {
+                    "status": "delivered",
+                    "product_kind": "workflow_result",
+                    "result_ref": {
+                        "kind": "workflow_draft",
+                        "id": "draft-a",
+                    },
+                },
+            }
+        return {
+            "ok": True,
+            "data": {
+                "ok": True,
+                "status": "workflow_draft_ready",
+                "draft_id": "draft-a",
+                "revision": 1,
+            },
+        }
+
+    monkeypatch.setattr(plugin, "_request", request)
+    result = plugin._handle_prepare_workflow_plan_draft(
+        {
+            "project_id": "project-a",
+            "canvas_id": "canvas-a",
+            "operation_id": "operation-a",
+            "plan": {"schema_version": "freezone_workflow_plan.v1"},
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "workflow_draft_ready"
+    assert result["draft_id"] == "draft-a"
+    assert [call[0] for call in calls] == ["GET", "GET"]
 
 
 def test_fixed_workflow_creation_is_rejected_before_canvas_bridge():
@@ -4605,12 +4664,200 @@ def test_unified_prepare_maps_raw_generation_answers(monkeypatch):
     assert "generation_answers" not in captured
 
 
+def test_unified_prepare_recovers_plan_identity_and_reserved_text_stage(monkeypatch):
+    plugin = _load_plugin_module()
+    handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
+    schemas = {name: schema for name, schema, _handler in plugin.TOOLS}
+    captured = {}
+    calls = []
+
+    def fake_request(method, path, *, body=None, **_kwargs):
+        calls.append((method, path))
+        if method == "GET":
+            return {
+                "ok": True,
+                "data": {
+                    "product_kind": "workflow_result",
+                    "canvas_id": "canvas-a",
+                    "artifact_id": "short-drama-quick@1",
+                    "metadata": {
+                        "skill_id": "short-drama-quick",
+                        "skill_version": "1",
+                    },
+                },
+            }
+        captured.update(body)
+        return {"ok": True, "data": {"ok": True, "status": "workflow_draft_ready"}}
+
+    monkeypatch.setattr(plugin, "_request", fake_request)
+    args = {
+        "project_id": "project-a",
+        "canvas_id": "canvas-a",
+        "operation_id": "op-a",
+        "plan": {
+            "nodes": [
+                {
+                    "id": "characters",
+                    "node_type": "textAnnotationNode",
+                    "data": {
+                        "stage": "asset",
+                        "prompt": "提取角色设定",
+                        "workflowCatalog": {
+                            "recipeId": "drama-character-extraction"
+                        },
+                    },
+                }
+            ],
+            "edges": [],
+        },
+    }
+
+    Draft202012Validator(schemas["freezone_prepare_workflow"]["parameters"]).validate(args)
+    result = handlers["freezone_prepare_workflow"](args)
+
+    assert result["status"] == "workflow_draft_ready"
+    assert calls[0][0] == "GET"
+    assert calls[1][0] == "POST"
+    assert captured["plan"]["schema_version"] == "freezone_workflow_plan.v1"
+    assert captured["plan"]["skill"] == {
+        "id": "short-drama-quick",
+        "version": "1",
+    }
+    assert "stage" not in captured["plan"]["nodes"][0]["data"]
+    assert captured["plan"]["nodes"][0]["stage"] == "characters"
+
+
+def test_unified_prepare_recovers_missing_skill_version(monkeypatch):
+    plugin = _load_plugin_module()
+    captured = {}
+
+    def request(method, _path, *, body=None, **_kwargs):
+        if method == "GET":
+            return {
+                "ok": True,
+                "data": {
+                    "product_kind": "workflow_result",
+                    "canvas_id": "canvas-a",
+                    "artifact_id": "short-drama-quick@1",
+                    "metadata": {
+                        "skill_id": "short-drama-quick",
+                        "skill_version": "1",
+                    },
+                },
+            }
+        captured.update(body)
+        return {"ok": True, "data": {"ok": True, "status": "workflow_draft_ready"}}
+
+    monkeypatch.setattr(plugin, "_request", request)
+    result = plugin._handle_prepare_workflow(
+        {
+            "project_id": "project-a",
+            "canvas_id": "canvas-a",
+            "operation_id": "op-a",
+            "plan": {
+                "schema_version": "freezone_workflow_plan.v1",
+                "skill": {"id": "short-drama-quick"},
+                "nodes": [],
+                "edges": [],
+            },
+        }
+    )
+
+    assert result["status"] == "workflow_draft_ready"
+    assert captured["plan"]["skill"] == {"id": "short-drama-quick", "version": "1"}
+
+
+@pytest.mark.parametrize(
+    ("canvas_id", "plan_skill", "expected_status"),
+    [
+        ("canvas-b", {"id": "short-drama-quick", "version": "1"},
+         "workflow_result_operation_scope_mismatch"),
+        ("canvas-a", {"id": "video-ad", "version": "1"},
+         "workflow_result_skill_identity_mismatch"),
+        ("canvas-a", {"id": "short-drama-quick", "version": "2"},
+         "workflow_result_skill_identity_mismatch"),
+    ],
+)
+def test_unified_prepare_rejects_operation_scope_or_identity_conflict(
+    monkeypatch, canvas_id, plan_skill, expected_status
+):
+    plugin = _load_plugin_module()
+
+    def request(method, _path, **_kwargs):
+        assert method == "GET"
+        return {
+            "ok": True,
+            "data": {
+                "product_kind": "workflow_result",
+                "canvas_id": "canvas-a",
+                "artifact_id": "short-drama-quick@1",
+                "metadata": {
+                    "skill_id": "short-drama-quick",
+                    "skill_version": "1",
+                },
+            },
+        }
+
+    monkeypatch.setattr(plugin, "_request", request)
+    result = plugin._handle_prepare_workflow(
+        {
+            "project_id": "project-a",
+            "canvas_id": canvas_id,
+            "operation_id": "op-a",
+            "plan": {"skill": plan_skill, "nodes": [], "edges": []},
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == expected_status
+
+
+def test_unified_prepare_reports_missing_complete_source_once(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(
+        plugin,
+        "_request",
+        lambda *_args, **_kwargs: pytest.fail("must not call API"),
+    )
+
+    result = plugin._handle_prepare_workflow(
+        {
+            "project_id": "project-a",
+            "canvas_id": "canvas-a",
+            "operation_id": "op-a",
+            "generation_answers": {"image_model": {"option_ids": ["image-a"]}},
+        }
+    )
+
+    assert result["status"] == "workflow_source_required"
+    assert result["errors"] == [
+        {
+            "path": "intent|plan",
+            "message": "exactly one complete workflow source is required",
+        }
+    ]
+    assert result["next_action"] == "submit_complete_workflow_source"
+    Draft202012Validator(plugin._output_schema("freezone_prepare_workflow")).validate(
+        result
+    )
+
+
 def test_unified_prepare_accepts_generation_clarification_receipt(monkeypatch):
     plugin = _load_plugin_module()
     handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
     captured = {}
 
     def fake_request(method, path, *, body=None, **_kwargs):
+        if method == "GET":
+            return {
+                "ok": True,
+                "data": {
+                    "product_kind": "workflow_result",
+                    "canvas_id": "canvas-a",
+                    "artifact_id": "video-ad@1",
+                    "metadata": {"skill_id": "video-ad", "skill_version": "1"},
+                },
+            }
         assert method == "POST"
         assert path.endswith("/workflow-drafts")
         captured.update(body)
@@ -7841,13 +8088,22 @@ def test_workflow_adapter_forwards_standard_clarification_from_api(monkeypatch, 
         "retryable": True,
         "next_action": "request_user_clarification",
     }
-    monkeypatch.setattr(
-        plugin,
-        "_request",
-        lambda *_a, **_kw: plugin._http_error_result(
+    def request(method, _path, **_kwargs):
+        if method == "GET":
+            return {
+                "ok": True,
+                "data": {
+                    "product_kind": "workflow_result",
+                    "canvas_id": "canvas_demo",
+                    "artifact_id": "video-ad@1",
+                    "metadata": {"skill_id": "video-ad", "skill_version": "1"},
+                },
+            }
+        return plugin._http_error_result(
             400, json.dumps({"detail": detail}), "Bad Request"
-        ),
-    )
+        )
+
+    monkeypatch.setattr(plugin, "_request", request)
     args = (
         {"plan": {"nodes": [], "edges": []}, "operation_id": "op-1"}
         if action == "prepare"
