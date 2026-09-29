@@ -1213,6 +1213,13 @@ async def test_codex_stream_passes_conversation_scope_to_thread_builder(
         assert "scope-filtered concrete operations" in developer_instructions
         assert "call the selected tool directly" in developer_instructions
         assert "custom-topology reference" in developer_instructions
+        assert "top-level schema_version plus skill.id and skill.version" in developer_instructions
+        assert "reserved input/resource/asset stages" in developer_instructions
+        assert "business totals belong in the compact Intent" in developer_instructions
+        assert (
+            "explicitly enumerates canvas nodes and a dependency graph"
+            in developer_instructions
+        )
         assert "freezone_prepare_workflow_plan_draft once" in developer_instructions
         assert (
             "dependency_for only controls execution order and never consumes source output"
