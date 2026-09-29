@@ -3203,6 +3203,7 @@
       },
       "submitting": "Submitting task…",
       "queued": "Task queued",
+      "workflowDraftDeliveryFailed": "Agent workflow draft delivery failed",
       "characters": {
         "chunking": "Splitting the source text…",
         "nothingToAnalyze": "Nothing to analyze",

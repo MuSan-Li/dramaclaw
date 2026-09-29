@@ -1788,6 +1788,51 @@ async def test_metered_html_recipe_text_generation_accepts_bound_admission(
     assert len(workflow_run_client.enqueued_tasks) == 1
 
 
+def test_workflow_result_operation_requires_and_enforces_canvas_scope(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    from novelvideo.api.routes import freezone
+
+    monkeypatch.setattr(freezone, "get_usage_meter", lambda: object())
+    missing_canvas = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/agent-product-operations",
+        json={
+            "product_kind": "workflow_result",
+            "generation_session_id": "generation-no-canvas",
+            "artifact_id": "video-ad@1.0.0",
+            "normalized_inputs_hash": "inputs-no-canvas",
+            "metadata": {"skill_id": "video-ad", "skill_version": "1.0.0"},
+        },
+    )
+    assert missing_canvas.status_code == 400
+    assert "canvas_id is required" in missing_canvas.text
+
+    admitted = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/agent-product-operations",
+        json={
+            "product_kind": "workflow_result",
+            "generation_session_id": "generation-canvas-a",
+            "canvas_id": "canvas-a",
+            "artifact_id": "video-ad@1.0.0",
+            "normalized_inputs_hash": "inputs-canvas-a",
+            "metadata": {"skill_id": "video-ad", "skill_version": "1.0.0"},
+        },
+    )
+    assert admitted.status_code == 200
+    operation_id = admitted.json()["data"]["operation_id"]
+    response = workflow_run_client.post(
+        "/api/v1/projects/proj_demo/freezone/canvases/canvas-b/workflow-drafts",
+        json={
+            "operation_id": operation_id,
+            "intent": {"skill_id": "video-ad", "user_goal": "广告"},
+            "compiled": _valid_draft_compiled(),
+        },
+    )
+
+    assert response.status_code == 400
+    assert "does not match target canvas" in response.text
+
+
 def test_metered_workflow_result_is_delivered_once_before_canvas_confirmation(
     workflow_run_client: TestClient, monkeypatch
 ) -> None:
@@ -2071,7 +2116,7 @@ async def test_late_agent_product_delivery_confirms_reserved_credit(
     observed_metrics: list[str] = []
     task = SimpleNamespace(
         task_id="product-task-a",
-        status="failed",
+        status="running" if product_kind == "workflow_result" else "failed",
         metadata={
             "feature_credit_reservation_id": "reservation-a",
             "error_code": "AGENT_PRODUCT_SETTLEMENT_PENDING",
@@ -2115,6 +2160,44 @@ async def test_late_agent_product_delivery_confirms_reserved_credit(
     assert settlements == [("reservation-a", "confirm")]
     assert completions[0]["metadata"]["settlement_status"] == "reconciled"
     assert observed_metrics == ["agent_product_reconciled"]
+
+
+@pytest.mark.asyncio
+async def test_failed_workflow_delivery_terminalizes_waiting_task(monkeypatch) -> None:
+    from novelvideo.api.routes import freezone
+
+    task = SimpleNamespace(
+        task_id="product-task-a",
+        status="running",
+        metadata={"error_code": "AGENT_PRODUCT_SETTLEMENT_PENDING"},
+    )
+    failures: list[dict] = []
+
+    class Manager:
+        def get_task_for_project(self, *_args, **_kwargs):
+            return task
+
+        def fail_task_for_project(self, *_args, **kwargs):
+            failures.append(kwargs)
+
+    monkeypatch.setattr(freezone, "get_task_manager", lambda: Manager())
+
+    await freezone._settle_failed_agent_product_task(
+        ctx=SimpleNamespace(project_id="proj_demo"),
+        operation={
+            "operation_id": "agent_product_a",
+            "project_id": "proj_demo",
+            "task_id": "product-task-a",
+            "task_type": "freezone_agent_workflow_result",
+            "product_kind": "workflow_result",
+            "status": "failed",
+        },
+        error="draft persistence failed",
+    )
+
+    assert failures[0]["expected_task_id"] == "product-task-a"
+    assert failures[0]["error"] == "draft persistence failed"
+    assert failures[0]["metadata"]["settlement_status"] == "failed"
 
 
 @pytest.mark.asyncio

@@ -3089,6 +3089,7 @@
       },
       "submitting": "Đang gửi tác vụ…",
       "queued": "Tác vụ đã vào hàng đợi",
+      "workflowDraftDeliveryFailed": "Agent không thể bàn giao bản nháp quy trình",
       "characters": {
         "chunking": "Đang cắt văn bản gốc…",
         "nothingToAnalyze": "Không có gì để phân tích",
