@@ -52,7 +52,6 @@
       "label": "视觉风格",
       "type": "single_select",
       "required": false,
-      "default": "",
       "options": [
         "写实",
         "电影感",
