@@ -165,10 +165,54 @@ except ValueError:
     DEFAULT_TIMEOUT_SECONDS = 120
 
 _PENDING_SKILL_STUDIO_DRAFTS: dict[str, dict[str, Any]] = {}
+# A revision conflict is a user-authorization boundary, not a retryable canvas
+# write error. Keep the canvas blocked until the user explicitly confirms the
+# current draft revision. This process-local guard covers the follow-up tool
+# calls that an agent may emit in the same turn after a stale confirmation.
+_REVISION_CONFLICT_CANVAS_BLOCKS: set[tuple[str, str]] = set()
 _SKILL_STUDIO_DEFAULT_SKILL_SCHEMA_VERSION = "dramaclaw.workflow-skill.v1"
 _SKILL_STUDIO_DEFAULT_SKILL_VERSION = "1.0.0"
 
 _SKILL_STUDIO_REAL_TOOL_CALL_INSTRUCTION = "不要用普通文本回复，不要把工具调用、参数块或代码块写进聊天内容；请直接调用对应工具。"
+
+
+def _revision_conflict_scope(project: str | None, canvas: str | None) -> tuple[str, str] | None:
+    project_id = str(project or "").strip()
+    canvas_id = str(canvas or "").strip()
+    if not project_id or not canvas_id:
+        return None
+    return project_id, canvas_id
+
+
+def _block_canvas_after_revision_conflict(project: str | None, canvas: str | None) -> None:
+    scope = _revision_conflict_scope(project, canvas)
+    if scope is not None:
+        _REVISION_CONFLICT_CANVAS_BLOCKS.add(scope)
+
+
+def _clear_canvas_revision_conflict(project: str | None, canvas: str | None) -> None:
+    scope = _revision_conflict_scope(project, canvas)
+    if scope is not None:
+        _REVISION_CONFLICT_CANVAS_BLOCKS.discard(scope)
+
+
+def _revision_conflict_write_error(project: str | None, canvas: str | None) -> dict[str, Any] | None:
+    scope = _revision_conflict_scope(project, canvas)
+    if scope not in _REVISION_CONFLICT_CANVAS_BLOCKS:
+        return None
+    return {
+        "ok": False,
+        "status": "canvas_revision_confirmation_required",
+        "code": "canvas_revision_confirmation_required",
+        "error": "canvas writes are blocked until the current workflow draft revision is explicitly confirmed",
+        "user_message": "画布版本发生变化，请先查看并明确确认最新工作流版本；本次未执行画布操作。",
+        "retryable": False,
+        "agent_instruction": (
+            "Do not issue another canvas write. Read the current workflow draft and show its "
+            "preview; only after the user explicitly confirms that exact revision may you "
+            "confirm the draft and continue."
+        ),
+    }
 
 
 def _agent_token_configured() -> bool:
@@ -5291,6 +5335,9 @@ def _emit_canvas_commands(
     project, canvas, scope_error = _resolve_canvas_scope_for_write(project, canvas)
     if scope_error:
         return scope_error
+    blocked = _revision_conflict_write_error(project, canvas)
+    if blocked is not None:
+        return tool_result(blocked)
     shape_error = (
         _validate_write_commands_shape(project, canvas, commands, allow_workflow_prepare=True)
         if allow_dynamic_workflow_batch and any(
@@ -6909,6 +6956,7 @@ def _handle_confirm_workflow_draft(args: dict[str, Any], **_: Any) -> str:
         # Rejected from the GET above only: nothing was claimed or dispatched.
         # The user confirmed an exact revision, and the current one may carry
         # changes they never reviewed, so it must not be confirmed silently.
+        _block_canvas_after_revision_conflict(project_id, canvas_id)
         return tool_result(
             {
                 "ok": False,
