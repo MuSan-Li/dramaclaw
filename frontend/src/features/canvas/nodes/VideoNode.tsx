@@ -2741,7 +2741,13 @@ export const VideoNode = memo(
         void refreshHistory();
       } catch (error) {
         console.error("[video-node] video gen failed", error);
-        updateNodeData(id, { isGenerating: false, generationStartedAt: null });
+        // Failures before any run starts (e.g. Recipe compilation) must land on
+        // the node too, or the workflow runner only sees "no videoUrl".
+        updateNodeData(id, {
+          isGenerating: false,
+          generationStartedAt: null,
+          generationError: backendErrorToastMessage(error, t),
+        });
         setAlbumPendingTotal(id, 0);
       }
       } finally {
