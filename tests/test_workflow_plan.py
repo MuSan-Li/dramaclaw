@@ -4324,6 +4324,7 @@ def test_retro_kungfu_skill_keeps_style_while_recipes_stay_stage_focused(monkeyp
 
     assert "1980s 复古香港功夫喜剧" in planning["prompt_guide"]
     assert "35mm 旧胶片颗粒" in planning["prompt_guide"]
+    assert "每个视频节点都必须针对当前镜头的每个核心动作逐项写出预备、运动、完成三段" in planning["prompt_guide"]
     assert "港式普通话口音" in planning["prompt_guide"]
     assert "剧本大纲" in planning["planning_notes"]
     assert "分镜规划" in planning["planning_notes"]
