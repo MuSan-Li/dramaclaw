@@ -11,6 +11,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import type { TFn } from "@/lib/i18n-types";
 import {
   ArrowUp,
   ChevronDown,
@@ -149,6 +150,7 @@ export function videoModeDisabledReason(
   mode: VideoGenMode,
   modelId: string | null | undefined,
   upstreamCounts: { videos: number; images: number; audios: number },
+  t: TFn,
   supportedModes?: string[],
 ): string | null {
   // HappyHorse 的模式可用性完全由上游节点类型决定（文档 4 大功能）：
@@ -205,9 +207,9 @@ export function videoModeDisabledReason(
     return null;
   }
   if (mode === "videoExtend") {
-    if (!isVideoModeSupportedByModel("videoExtend", model)) return "该模型不支持「视频延长」";
+    if (!isVideoModeSupportedByModel("videoExtend", model)) return t("node.videoOps.modeDisabled.modelNoVideoExtend");
     if (upstreamCounts.videos !== 1 || upstreamCounts.images > 0 || upstreamCounts.audios > 0) {
-      return "视频延长只接受 1 个源视频，不能接图片或音频";
+      return t("node.videoModel.reason.videoExtendSourceOnly");
     }
     return null;
   }
@@ -358,6 +360,7 @@ function GenModeSelect({
               tab.key,
               modelId,
               upstreamCounts,
+              t,
               supportedModes,
             );
             const isDisabled = disabledReason != null && !isActive;
@@ -918,6 +921,7 @@ function ReferenceMediaRow({
 }: ReferenceMediaRowProps) {
   // 同时管理整行音频的「当前播放节点」—— 同一时间只允许一个 audio chip 在
   // 播放。点击另一个会切换；再点同一个会暂停。
+  const { t } = useTranslation();
   const [playingAudioNodeId, setPlayingAudioNodeId] = useState<string | null>(
     null,
   );
@@ -961,7 +965,7 @@ function ReferenceMediaRow({
             imageReference: "多图参考",
             firstLastFrame: "首尾帧",
             videoEdit: "视频编辑",
-            videoExtend: "视频延长",
+            videoExtend: t("node.videoNode.tabs.videoExtend"),
             allReference: "全能参考",
           }[genMode] ?? "当前模式";
         const overCapTitle = overCap
