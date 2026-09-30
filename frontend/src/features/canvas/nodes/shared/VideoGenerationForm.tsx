@@ -102,6 +102,7 @@ const MODE_TABS: ReadonlyArray<{ key: VideoGenMode; labelKey: string }> = [
   { key: "firstLastFrame", labelKey: "node.videoNode.tabs.firstLastFrame" },
   { key: "imageReference", labelKey: "node.videoNode.tabs.imageReference" },
   { key: "videoEdit", labelKey: "node.videoNode.tabs.videoEdit" },
+  { key: "videoExtend", labelKey: "node.videoNode.tabs.videoExtend" },
 ];
 
 // HappyHorse 的模式面板顺序：文生视频 → 首帧 → 图片参考 → 视频编辑。
@@ -203,6 +204,13 @@ export function videoModeDisabledReason(
     if (upstreamCounts.videos > 1) return "「视频编辑」仅支持连接 1 个视频节点";
     return null;
   }
+  if (mode === "videoExtend") {
+    if (!isVideoModeSupportedByModel("videoExtend", model)) return "该模型不支持「视频延长」";
+    if (upstreamCounts.videos !== 1 || upstreamCounts.images > 0 || upstreamCounts.audios > 0) {
+      return "视频延长只接受 1 个源视频，不能接图片或音频";
+    }
+    return null;
+  }
   if (upstreamCounts.videos > 0 && mode !== "allReference") {
     return supportsVideoEdit
       ? "上游含视频素材时只能用「全能参考」或「视频编辑」"
@@ -258,6 +266,7 @@ function GenModeSelect({
         imageReference: "image_reference",
         allReference: "all_reference",
         videoEdit: "video_edit",
+        videoExtend: "video_extend",
       };
       return MODE_TABS.filter((tab) => supportedModes.includes(keyMap[tab.key]));
     }
@@ -952,6 +961,7 @@ function ReferenceMediaRow({
             imageReference: "多图参考",
             firstLastFrame: "首尾帧",
             videoEdit: "视频编辑",
+            videoExtend: "视频延长",
             allReference: "全能参考",
           }[genMode] ?? "当前模式";
         const overCapTitle = overCap
