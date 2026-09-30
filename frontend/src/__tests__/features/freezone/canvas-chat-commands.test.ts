@@ -4574,9 +4574,6 @@ describe("canvas chat commands", () => {
             resolution: expect.objectContaining({
               options: ["1080p", "2k", "4k"],
             }),
-            denoise: expect.objectContaining({
-              options: ["none", "1x", "2x"],
-            }),
           }),
         }),
         result_effect: expect.objectContaining({
@@ -4585,6 +4582,7 @@ describe("canvas chat commands", () => {
       }),
     ]);
     expect(nodeActionCatalog?.data?.editable_schema).toBeUndefined();
+    expect(nodeActionCatalog?.data?.actions?.[0]?.parameters?.parameter_schema).not.toHaveProperty("denoise");
     expect(nodeActionCatalog?.data?.instruction).toContain(
       "do not answer from the source node parameters",
     );
@@ -4650,11 +4648,7 @@ describe("canvas chat commands", () => {
       current_value: "1080p",
       options: ["1080p", "2k", "4k"],
     });
-    expect(parameters.upscaleDenoise).toMatchObject({
-      label: "降噪",
-      current_value: "1x",
-      options: ["none", "1x", "2x"],
-    });
+    expect(parameters.upscaleDenoise).toBeUndefined();
     expect(parameters.model).toBeUndefined();
     expect(parameters.quality).toBeUndefined();
     expect(parameters.durationSec).toBeUndefined();
