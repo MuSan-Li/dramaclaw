@@ -1129,19 +1129,23 @@ def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
         generation_preferences = {}
     if not isinstance(generation_preferences, dict) or any(
         key not in {
-            "image_aspect_ratio", "video_aspect_ratio", "video_resolution",
-            "video_duration_seconds", "video_generate_audio",
+            "image_aspect_ratio", "image_resolution", "image_quality",
+            "image_variants_per_node", "video_aspect_ratio", "video_resolution",
+            "video_duration_seconds", "video_generate_audio", "video_variants_per_node",
             "video_shot_durations_seconds", "delivery_resolution",
         }
         for key in generation_preferences
     ):
         return tool_result({
             "ok": False, "status": "generation_clarification_args_invalid",
-            "error": "generation_preferences contains unsupported fields",
+            "error": (
+                "generation_preferences supports image/video aspect ratio, resolution, "
+                "quality, variants, duration, audio, per-shot durations, and delivery resolution"
+            ),
         })
     scalar_text_fields = (
-        "image_aspect_ratio", "video_aspect_ratio", "video_resolution",
-        "delivery_resolution",
+        "image_aspect_ratio", "image_resolution", "image_quality",
+        "video_aspect_ratio", "video_resolution", "delivery_resolution",
     )
     if any(
         field in generation_preferences
@@ -1159,10 +1163,19 @@ def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
             or not math.isfinite(generation_preferences["video_duration_seconds"])
             or not 0 < generation_preferences["video_duration_seconds"] <= 600
         )
+    ) or any(
+        field in generation_preferences
+        and (
+            type(generation_preferences[field]) is not int
+            or generation_preferences[field] not in {1, 2, 4}
+        )
+        for field in ("image_variants_per_node", "video_variants_per_node")
     ):
         return tool_result({
             "ok": False, "status": "generation_clarification_args_invalid",
-            "error": "generation_preferences contains an invalid value",
+            "error": (
+                "generation_preferences contains an invalid value; variants must be 1, 2, or 4"
+            ),
         })
     shot_durations = generation_preferences.get("video_shot_durations_seconds")
     if shot_durations is not None and (
@@ -1178,10 +1191,22 @@ def _handle_request_user_clarification(args: dict[str, Any], **_: Any) -> str:
             "error": "video_shot_durations_seconds must contain positive durations",
         })
     if shot_durations is not None and "video_duration_seconds" in generation_preferences:
-        return tool_result({
-            "ok": False, "status": "generation_clarification_args_invalid",
-            "error": "Pass either a shared video duration or per-shot durations",
-        })
+        shared_duration = generation_preferences["video_duration_seconds"]
+        if any(value != shared_duration for value in shot_durations):
+            return tool_result({
+                "ok": False, "status": "generation_clarification_args_invalid",
+                "error": (
+                    "video_duration_seconds and video_shot_durations_seconds conflict; "
+                    "omit the shared duration or make every shot duration equal"
+                ),
+            })
+        # Equal values describe the same preference. Keep the per-shot list so
+        # downstream nodes retain their explicit duration contract, while
+        # avoiding a needless retry for duplicate information.
+        generation_preferences = {
+            key: value for key, value in generation_preferences.items()
+            if key != "video_duration_seconds"
+        }
     if generation_media_types is not None and shot_durations is not None:
         questions = [
             question for question in questions
@@ -3677,6 +3702,9 @@ def _generation_clarification_recommendations(
             elif question_id == "video_duration_seconds":
                 if (not isinstance(value, (int, float)) or isinstance(value, bool)
                     or not math.isfinite(value) or not 0 < value <= 600):
+                    return {}
+            elif question_id.endswith("variants_per_node"):
+                if type(value) is not int or value not in {1, 2, 4}:
                     return {}
             elif not isinstance(value, str) or not value.strip():
                 return {}
@@ -9924,7 +9952,8 @@ TOOLS = (
                     "type": "object",
                     "description": (
                         "Only generation specs explicitly stated by the user. Pass image/video "
-                        "aspect ratios and whether video shots need generated speech/audio. "
+                        "aspect ratios, resolutions, quality, variant counts, and whether video "
+                        "shots need generated speech/audio. "
                         "When both media types are requested, one supplied aspect ratio is "
                         "recommended for both if supported; pass both when intentionally distinct. "
                         "Use video_shot_durations_seconds for distinct shot lengths; each "
@@ -9934,12 +9963,16 @@ TOOLS = (
                     ),
                     "properties": {
                         "image_aspect_ratio": {"type": "string"},
+                        "image_resolution": {"type": "string"},
+                        "image_quality": {"type": "string"},
+                        "image_variants_per_node": {"type": "integer", "enum": [1, 2, 4]},
                         "video_aspect_ratio": {"type": "string"},
                         "video_resolution": {"type": "string"},
                         "video_duration_seconds": {
                             "type": "number", "exclusiveMinimum": 0, "maximum": 600,
                         },
                         "video_generate_audio": {"type": "boolean"},
+                        "video_variants_per_node": {"type": "integer", "enum": [1, 2, 4]},
                         "video_shot_durations_seconds": {
                             "type": "array", "minItems": 1,
                             "items": {"type": "number", "exclusiveMinimum": 0, "maximum": 600},
