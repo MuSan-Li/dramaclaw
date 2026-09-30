@@ -1850,6 +1850,9 @@ def compile_workflow_intent(intent: Any) -> dict[str, Any]:
             requested_mode=requested_mode,
             item_count=len(_intent_items(compiled_intent)),
         )
+        _apply_confirmed_input_guidance(
+            compiled_intent.get("items") or [], skill_id, input_contract["resolved"]
+        )
     else:
         compiled_intent, planner_metadata, planner_error = (
             _expand_standard_skill_intent(
@@ -1862,6 +1865,9 @@ def compile_workflow_intent(intent: Any) -> dict[str, Any]:
         if planner_error is not None:
             return planner_error
         plan_metadata = planner_metadata
+        _apply_confirmed_input_guidance(
+            compiled_intent.get("items") or [], skill_id, input_contract["resolved"]
+        )
 
     compiled = _compile_dynamic_recipe_items_intent(
         intent=compiled_intent,
@@ -2296,6 +2302,45 @@ def _standard_planner_units(
             for offset, index in enumerate(missing_indices):
                 units[index]["duration_seconds"] = base + (1 if offset < extra else 0)
     return units
+
+
+def _confirmed_input_guidance(
+    skill_id: str, resolved_inputs: dict[str, Any]
+) -> str:
+    """Return concise, user-confirmed creative constraints for node prompts.
+
+    ``confirmedInputs`` is retained as structured metadata, but prompt consumers
+    also need the decision in their task brief. Keeping this guidance in the
+    compiled item prompt makes the choice survive the planning-to-Recipe handoff.
+    """
+    if not isinstance(resolved_inputs, dict):
+        return ""
+    parts: list[str] = []
+    visual_style = _text(resolved_inputs.get("visual_style"))
+    if visual_style and skill_id == "short-drama-quick":
+        parts.append(
+            f"已确认视觉风格为「{visual_style}」；角色、场景、分镜、首帧和视频必须保持该风格。"
+        )
+    character_method = _text(resolved_inputs.get("character_input_method"))
+    if character_method and skill_id == "pixar-ip-ad-video":
+        parts.append(
+            f"已确认角色来源为「{character_method}」；不得回退到预设角色或改用未确认的角色来源。"
+        )
+    return " ".join(parts)
+
+
+def _apply_confirmed_input_guidance(
+    items: list[dict[str, Any]], skill_id: str, resolved_inputs: dict[str, Any]
+) -> None:
+    guidance = _confirmed_input_guidance(skill_id, resolved_inputs)
+    if not guidance:
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        prompt = _text(item.get("prompt"))
+        if guidance not in prompt:
+            item["prompt"] = f"{prompt} {guidance}".strip()
 
 
 def _planned_item(
