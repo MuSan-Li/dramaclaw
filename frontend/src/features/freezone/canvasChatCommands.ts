@@ -696,7 +696,10 @@ function isRecipeAttemptEndedError(error: string | null | undefined): boolean {
 
 /** Keep the raw reason (and marker) so the server still classifies it as final. */
 function recipeAttemptEndedMessage(error: string): string {
-  return `本次节点执行已结束，请重新运行该节点以开始新的执行（${error}）`;
+  return i18next.t("freezone.chat.workflowRecipeAttemptEnded", {
+    reason: error,
+    interpolation: { escapeValue: false },
+  });
 }
 
 function isRetryableWorkflowActionError(error: string | null | undefined): boolean {

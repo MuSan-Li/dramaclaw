@@ -911,6 +911,7 @@
       "canvasTimeoutCancelled": "Thao tác trên canvas đã hết thời gian chờ và bị huỷ, chưa áp dụng thay đổi.",
       "canvasManuallyCancelled": "Thao tác trên canvas đã bị huỷ thủ công, chưa áp dụng thay đổi.",
       "workflowOutputSyncPendingLabel": "Đang đồng bộ kết quả",
+      "workflowRecipeAttemptEnded": "Lượt chạy của nút này đã kết thúc. Hãy chạy lại nút để bắt đầu lượt mới ({{reason}})",
       "workflowOutputSyncPendingMessage": "Quy trình đã hoàn tất nhưng kết quả trên canvas vẫn đang đồng bộ. Hãy tải lại canvas sau để kiểm tra; tạm thời đừng tạo lại.",
       "workflowReconciliationPendingLabel": "Đang đối soát",
       "workflowReconciliationPendingMessage": "Kết quả đã xuất hiện trên canvas nhưng máy chủ vẫn đang xác minh tác vụ. Hãy kiểm tra trạng thái chạy sau; tạm thời đừng tạo lại.",

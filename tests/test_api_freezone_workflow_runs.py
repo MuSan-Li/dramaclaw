@@ -4571,3 +4571,83 @@ def test_workflow_media_link_reports_ended_recipe_attempt(
     diagnostics = workflow_error_diagnostics(wrapped)
     assert diagnostics["retryable"] is False
     assert "重新运行该节点" in diagnostics["user_error"]
+
+
+@pytest.mark.parametrize("endpoint", ["compile", "compile-batch"])
+def test_recipe_compile_reports_attempt_settled_during_evidence_write(
+    workflow_run_client: TestClient, monkeypatch, endpoint: str
+) -> None:
+    """The attempt can end between the terminal check and the evidence write."""
+    from novelvideo.api.routes import freezone
+    from novelvideo.freezone.recipe_runtime import RecipeCompileResult
+
+    racing, live = _two_video_recipe_operations(workflow_run_client, monkeypatch)
+    real_bind = freezone.bind_agent_product_model_execution
+
+    def bind_after_concurrent_settle(**kwargs):
+        if kwargs["operation_id"] == racing:
+            _fail_recipe_operation(workflow_run_client, racing)
+        return real_bind(**kwargs)
+
+    def model_result(index: int) -> RecipeCompileResult:
+        return RecipeCompileResult(
+            "video prompt", "model", ("product-video",),
+            model_call_id=f"recipe-compiler:{index}", executed_at=1.0,
+        )
+
+    async def compile_one(**_kwargs):
+        return model_result(0)
+
+    async def compile_batch(items):
+        return [model_result(index) for index, _item in enumerate(items)]
+
+    monkeypatch.setattr(
+        freezone, "bind_agent_product_model_execution", bind_after_concurrent_settle
+    )
+    monkeypatch.setattr(freezone, "compile_recipe_prompt_result", compile_one)
+    monkeypatch.setattr(freezone, "compile_recipe_prompt_batch", compile_batch)
+    if endpoint == "compile":
+        response = workflow_run_client.post(
+            "/api/v1/freezone/recipes/compile", json=_video_compile_item(racing)
+        )
+        assert response.status_code == 409
+        assert "recipe attempt ended (failed)" in response.json()["detail"]
+        return
+    response = workflow_run_client.post(
+        "/api/v1/freezone/recipes/compile-batch",
+        json={"items": [
+            _video_compile_item(racing, "racing"),
+            _video_compile_item(live, "live"),
+        ]},
+    )
+    assert response.status_code == 200, response.text
+    items = {item["request_id"]: item for item in response.json()["data"]["items"]}
+    assert items["racing"]["ok"] is False
+    assert "recipe attempt ended (failed)" in items["racing"]["error"]
+    assert items["live"]["ok"] is True
+
+
+def test_recipe_compile_does_not_replay_attempt_settled_during_replay(
+    workflow_run_client: TestClient, monkeypatch
+) -> None:
+    """The saved-prompt read follows the status read; an ended attempt is not replayed."""
+    from novelvideo.api.routes import freezone
+
+    operation_id, _other = _two_video_recipe_operations(workflow_run_client, monkeypatch)
+
+    def saved_prompt_after_concurrent_settle(**_kwargs):
+        _fail_recipe_operation(workflow_run_client, operation_id)
+        return "saved video prompt"
+
+    async def forbidden_compile(**_kwargs):
+        raise AssertionError("a saved model prompt must be replayed, not recompiled")
+
+    monkeypatch.setattr(
+        freezone, "read_recipe_model_prompt", saved_prompt_after_concurrent_settle
+    )
+    monkeypatch.setattr(freezone, "compile_recipe_prompt_result", forbidden_compile)
+    response = workflow_run_client.post(
+        "/api/v1/freezone/recipes/compile", json=_video_compile_item(operation_id)
+    )
+    assert response.status_code == 409
+    assert "recipe attempt ended (failed)" in response.json()["detail"]
