@@ -7038,6 +7038,10 @@ def _handle_confirm_workflow_draft(args: dict[str, Any], **_: Any) -> str:
                 "error": "The claimed draft has no durable task identity; no canvas commands were emitted.",
             }
         )
+    # The user has explicitly confirmed the exact revision and the server has
+    # claimed its durable task. Release the stale-revision write fence before
+    # dispatching this authorized command.
+    _clear_canvas_revision_conflict(project_id, canvas_id)
     explicit_project = str(args.get("project_id") or "").strip()
     explicit_canvas = str(args.get("canvas_id") or "").strip()
     stored_project = str(payload.get("project_id") or "").strip()
@@ -7221,6 +7225,77 @@ def _single_write_command(args: dict[str, Any], command: dict[str, Any]) -> str:
     project = str(args.get("project_id") or _default_project_id()).strip() or None
     canvas = str(args.get("canvas_id") or _default_canvas_id()).strip() or None
     return _emit_canvas_commands(project, canvas, [command], slim_result=True)
+
+
+def _validate_dynamic_recipe_action_binding(
+    *, node_id: str, action: str, parameters: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Keep an ecommerce remix action bound to one source and one target.
+
+    The regular node action path remains compatible with ordinary standalone
+    generation. When an agent supplies dynamic Recipe metadata, however, the
+    binding is explicit and must describe exactly one source/target pair. This
+    prevents a malformed retry from silently dropping the source image or
+    issuing multiple media actions under one confirmation.
+    """
+    raw_actions = parameters.get("actions")
+    if raw_actions is not None:
+        if not isinstance(raw_actions, list) or len(raw_actions) != 1:
+            return {
+                "ok": False,
+                "status": "multiple_media_actions_rejected",
+                "error": "a run_node_action request must contain exactly one media action",
+            }
+        if raw_actions[0] != action:
+            return {
+                "ok": False,
+                "status": "action_binding_mismatch",
+                "error": "the bound media action must match the requested run_node_action",
+            }
+    recipe_id = str(
+        parameters.get("recipe_id") or parameters.get("recipeId") or ""
+    ).strip()
+    source_node_id = str(
+        parameters.get("source_node_id") or parameters.get("sourceNodeId") or ""
+    ).strip()
+    target_node_id = str(
+        parameters.get("target_node_id") or parameters.get("targetNodeId") or node_id
+    ).strip()
+    skill_id = str(parameters.get("skill_id") or parameters.get("skillId") or "").strip()
+    # No dynamic binding fields means this is an ordinary standalone action.
+    if not any((recipe_id, source_node_id, skill_id, raw_actions is not None)):
+        return None
+    if recipe_id != "ecommerce-remix-image":
+        return {
+            "ok": False,
+            "status": "invalid_recipe_binding",
+            "error": "dynamic ecommerce image actions require recipe_id=ecommerce-remix-image",
+        }
+    if skill_id and skill_id != "ecommerce-ad":
+        return {
+            "ok": False,
+            "status": "invalid_recipe_binding",
+            "error": "ecommerce-remix-image must be bound to skill_id=ecommerce-ad",
+        }
+    if not source_node_id:
+        return {
+            "ok": False,
+            "status": "source_node_required",
+            "error": "dynamic ecommerce remix action requires source_node_id",
+        }
+    if not target_node_id or target_node_id != node_id:
+        return {
+            "ok": False,
+            "status": "target_node_mismatch",
+            "error": "target_node_id must match node_id for the confirmed action",
+        }
+    if source_node_id == target_node_id:
+        return {
+            "ok": False,
+            "status": "source_target_mismatch",
+            "error": "source_node_id and target_node_id must identify different nodes",
+        }
+    return None
 
 
 def _handle_create_node(args: dict[str, Any], **_: Any) -> str:
@@ -7507,7 +7582,24 @@ def _handle_run_node_action(args: dict[str, Any], **_: Any) -> str:
         return tool_result(
             {"ok": False, "status": "action_required", "error": "action is required"}
         )
-    parameters = args.get("parameters") or args.get("params")
+    raw_parameters = args.get("parameters") or args.get("params")
+    parameters_provided = isinstance(raw_parameters, dict)
+    parameters = raw_parameters
+    if not isinstance(parameters, dict):
+        parameters = {}
+    # Keep dynamic Recipe bindings explicit even when an MCP caller places
+    # them beside the action fields instead of inside parameters.
+    for key in ("recipe_id", "recipeId", "skill_id", "skillId", "source_node_id", "sourceNodeId", "target_node_id", "targetNodeId"):
+        if key in args and key not in parameters:
+            parameters[key] = args[key]
+    if action in {"generate_image", "generate_video"} and isinstance(parameters, dict):
+        binding_error = _validate_dynamic_recipe_action_binding(
+            node_id=node_id,
+            action=action,
+            parameters=parameters,
+        )
+        if binding_error is not None:
+            return tool_result(binding_error)
     if action in {"read_source", "history"}:
         project = (
             str(
@@ -7523,7 +7615,7 @@ def _handle_run_node_action(args: dict[str, Any], **_: Any) -> str:
             "node_id": node_id,
             "action": action,
         }
-        if isinstance(parameters, dict):
+        if parameters_provided or parameters:
             request["parameters"] = dict(parameters)
         return _request_canvas_context_from_frontend(
             project=project,
@@ -7535,7 +7627,7 @@ def _handle_run_node_action(args: dict[str, Any], **_: Any) -> str:
         "node_id": node_id,
         "action": action,
     }
-    if isinstance(parameters, dict):
+    if parameters_provided or parameters:
         command["parameters"] = dict(parameters)
     if bool(args.get("regenerate") or args.get("force_regenerate")):
         command.setdefault("parameters", {})["regenerate"] = True
@@ -11045,6 +11137,22 @@ TOOLS = (
                 "parameters": {
                     "type": "object",
                     "description": "Optional parameters for actions whose action_catalog exposes parameter_schema. For generation actions, omit regenerate unless the user explicitly asks to regenerate/overwrite existing output.",
+                },
+                "recipe_id": {
+                    "type": "string",
+                    "description": "For a dynamic ecommerce remix, exact Recipe id ecommerce-remix-image.",
+                },
+                "skill_id": {
+                    "type": "string",
+                    "description": "For a dynamic ecommerce remix, exact Skill id ecommerce-ad.",
+                },
+                "source_node_id": {
+                    "type": "string",
+                    "description": "Dynamic source canvas node consumed by the target generation node.",
+                },
+                "target_node_id": {
+                    "type": "string",
+                    "description": "Target node id; must match node_id for a dynamic action.",
                 },
                 "regenerate": {
                     "type": "boolean",
