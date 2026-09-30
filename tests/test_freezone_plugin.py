@@ -7473,6 +7473,97 @@ def test_canvas_command_handlers_reject_legacy_scope_instead_of_using_defaults()
         assert "project" in result["error"]
 
 
+def test_revision_conflict_blocks_follow_up_canvas_writes_until_explicit_confirmation():
+    plugin = _load_plugin_module()
+    plugin._block_canvas_after_revision_conflict("project-a", "canvas-a")
+
+    result = plugin._emit_canvas_commands(
+        "project-a",
+        "canvas-a",
+        [{"type": "run_node_action", "node_id": "image-a", "action": "generate_image"}],
+        slim_result=True,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "canvas_revision_confirmation_required"
+    assert "未执行画布操作" in result["user_message"]
+
+    plugin._clear_canvas_revision_conflict("project-a", "canvas-a")
+    # The guard is the only concern of this regression test; the next stage
+    # may fail because no local frontend bridge is running.
+    assert plugin._revision_conflict_write_error("project-a", "canvas-a") is None
+
+
+@pytest.mark.parametrize(
+    "parameters, status",
+    [
+        ({"recipe_id": "ecommerce-remix-image"}, "source_node_required"),
+        (
+            {
+                "recipe_id": "ecommerce-remix-image",
+                "source_node_id": "source-a",
+                "target_node_id": "target-b",
+            },
+            "target_node_mismatch",
+        ),
+        (
+            {
+                "recipe_id": "ecommerce-remix-image",
+                "source_node_id": "source-a",
+                "actions": ["generate_image", "generate_image"],
+            },
+            "multiple_media_actions_rejected",
+        ),
+    ],
+)
+def test_dynamic_recipe_action_requires_one_exact_source_and_target_binding(
+    parameters, status
+):
+    plugin = _load_plugin_module()
+    result = plugin._handle_run_node_action(
+        {
+            "project_id": "project-a",
+            "canvas_id": "canvas-a",
+            "node_id": "target-a",
+            "action": "generate_image",
+            "parameters": parameters,
+        }
+    )
+    assert result["ok"] is False
+    assert result["status"] == status
+
+
+def test_dynamic_recipe_action_passes_exact_binding_as_one_command(monkeypatch):
+    plugin = _load_plugin_module()
+    captured = {}
+
+    def fake_single(args, command):
+        captured.update(command)
+        return {"ok": True, "command": command}
+
+    monkeypatch.setattr(plugin, "_single_write_command", fake_single)
+    result = plugin._handle_run_node_action(
+        {
+            "project_id": "project-a",
+            "canvas_id": "canvas-a",
+            "node_id": "target-a",
+            "action": "generate_image",
+            "parameters": {
+                "recipe_id": "ecommerce-remix-image",
+                "skill_id": "ecommerce-ad",
+                "source_node_id": "source-a",
+                "target_node_id": "target-a",
+                "actions": ["generate_image"],
+            },
+        }
+    )
+    assert result["ok"] is True
+    assert captured["type"] == "run_node_action"
+    assert captured["node_id"] == "target-a"
+    assert captured["parameters"]["recipe_id"] == "ecommerce-remix-image"
+    assert captured["parameters"]["source_node_id"] == "source-a"
+
+
 def test_agent_tool_scope_exposes_only_canonical_canvas_id():
     plugin = _load_plugin_module()
 
