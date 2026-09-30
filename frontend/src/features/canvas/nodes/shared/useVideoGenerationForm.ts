@@ -1837,7 +1837,12 @@ export function useVideoGenerationForm(
       return completedUrls[0] ? { videoUrl: completedUrls[0] } : {};
     } catch (error) {
       console.error("[video-node] video gen failed", error);
-      updateNodeData(id, CLEARED_GENERATION_TASK_FIELDS);
+      // Failures before any run starts (e.g. Recipe compilation) must land on
+      // the node too, or the workflow runner only sees "no videoUrl".
+      updateNodeData(id, {
+        ...CLEARED_GENERATION_TASK_FIELDS,
+        generationError: backendErrorToastMessage(error, t),
+      });
       setAlbumPendingTotal(id, 0);
     }
     } finally {

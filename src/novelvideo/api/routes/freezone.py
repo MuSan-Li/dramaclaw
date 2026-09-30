@@ -204,6 +204,8 @@ from novelvideo.freezone.agent_product_operations import (
     save_agent_generation_session,
 )
 from novelvideo.freezone.workflow_runs import (
+    RECIPE_ATTEMPT_ENDED_MARKER,
+    RECIPE_ATTEMPT_ENDED_STATUSES,
     _validate_action_artifact,
     WorkflowRunIdempotencyConflict,
     WorkflowRunLeaseConflict,
@@ -220,6 +222,7 @@ from novelvideo.freezone.workflow_runs import (
     reconcile_workflow_runs_with_canvas_nodes,
     reconcile_workflow_runs_with_canvas_results,
     reconcile_workflow_runs_with_tasks,
+    recipe_attempt_ended_message,
     update_workflow_run,
     workflow_media_failure_awaits_retry,
 )
@@ -483,6 +486,26 @@ def _handle_task_start_runtime_error(message: str, exc: RuntimeError) -> None:
     handle_task_start_runtime_error(logger, message, exc)
 
 
+def _raise_if_recipe_attempt_ended(operation: dict[str, Any]) -> None:
+    """Refuse further work on a settled Recipe attempt; only a rerun can proceed."""
+    status = str(operation.get("status") or "")
+    if status in RECIPE_ATTEMPT_ENDED_STATUSES:
+        raise HTTPException(409, recipe_attempt_ended_message(status))
+
+
+async def _raise_if_recipe_attempt_ended_now(state_dir: Path, operation_id: str) -> None:
+    """Re-read the operation so a concurrently settled attempt reports as ended."""
+    current = await asyncio.to_thread(
+        read_agent_product_operation, project_dir=state_dir, operation_id=operation_id
+    )
+    if current is not None:
+        _raise_if_recipe_attempt_ended(current)
+
+
+def _is_recipe_attempt_ended(exc: HTTPException) -> bool:
+    return exc.status_code == 409 and RECIPE_ATTEMPT_ENDED_MARKER in str(exc.detail)
+
+
 def _verified_workflow_media_link(
     *,
     ctx: ProjectContext,
@@ -505,7 +528,6 @@ def _verified_workflow_media_link(
     if (
         operation is None
         or operation.get("product_kind") != "recipe_result"
-        or operation.get("status") in {"failed", "cancelled"}
         or operation.get("project_id") != ctx.project_id
         or operation.get("canvas_id") != canvas_id
         or operation.get("artifact_id") != node_id
@@ -516,6 +538,7 @@ def _verified_workflow_media_link(
         raise HTTPException(
             409, "workflow media link does not match admitted Recipe attempt"
         )
+    _raise_if_recipe_attempt_ended(operation)
     return {
         "product_operation_id": operation_id,
         "generation_attempt_id": attempt_id,
@@ -5443,31 +5466,56 @@ async def _record_recipe_compile_product_evidence(
     if operation.get("status") == "delivered":
         await _reconcile_recipe_delivery(ctx=ctx, operation=operation)
         return
-    if operation.get("status") in {"failed", "cancelled"}:
-        return
-    if (
-        compiled.mode == "model"
-        and str(compiled.model_call_id or "").strip()
-        and compiled.executed_at
-    ):
-        await asyncio.to_thread(
-            bind_agent_product_model_execution,
-            project_dir=state_dir,
-            operation_id=operation_id,
-            model_call_id=compiled.model_call_id,
-            executed_at=compiled.executed_at,
-            source="server_recipe_compiler",
-            compile_mode="model",
-            compiled_prompt="" if deliver_text else compiled.prompt,
-        )
-        if deliver_text:
-            # Synchronous text generation has no separate media task. Persist
-            # the actual server-produced text in the operation's immutable
-            # result receipt, rather than waiting for a nonexistent task key.
-            # finish_agent_product_operation atomically stores this receipt and
-            # transitions to delivered; reconcile even if the worker timed out.
-            if body.node_kind != "text" or not compiled.prompt.strip():
-                raise ValueError("text delivery requires a non-empty text result")
+    # A concurrent request (e.g. a timed-out earlier compile) may have failed
+    # this attempt while we compiled. Returning the prompt would send the
+    # runner on to a media submission that can only 409.
+    _raise_if_recipe_attempt_ended(operation)
+    try:
+        if (
+            compiled.mode == "model"
+            and str(compiled.model_call_id or "").strip()
+            and compiled.executed_at
+        ):
+            await asyncio.to_thread(
+                bind_agent_product_model_execution,
+                project_dir=state_dir,
+                operation_id=operation_id,
+                model_call_id=compiled.model_call_id,
+                executed_at=compiled.executed_at,
+                source="server_recipe_compiler",
+                compile_mode="model",
+                compiled_prompt="" if deliver_text else compiled.prompt,
+            )
+            if deliver_text:
+                # Synchronous text generation has no separate media task. Persist
+                # the actual server-produced text in the operation's immutable
+                # result receipt, rather than waiting for a nonexistent task key.
+                # finish_agent_product_operation atomically stores this receipt and
+                # transitions to delivered; reconcile even if the worker timed out.
+                if body.node_kind != "text" or not compiled.prompt.strip():
+                    raise ValueError("text delivery requires a non-empty text result")
+                operation = await asyncio.to_thread(
+                    finish_agent_product_operation,
+                    project_dir=state_dir,
+                    operation_id=operation_id,
+                    outcome="delivered",
+                    expected_task_id=str(operation.get("task_id") or ""),
+                    result_ref={
+                        "kind": "recipe_text_result",
+                        "id": operation_id,
+                        "content": compiled.prompt,
+                    },
+                )
+                await _reconcile_recipe_delivery(ctx=ctx, operation=operation)
+            return
+        if compiled.prompt.strip() and compiled.mode in {
+            "timeout_fallback",
+            "memory_cache",
+            "persistent_cache",
+            "deterministic",
+        }:
+            # Recipe use is billable regardless of compilation mode. Persist the
+            # usable prompt as server-owned delivery evidence, not fake model evidence.
             operation = await asyncio.to_thread(
                 finish_agent_product_operation,
                 project_dir=state_dir,
@@ -5475,44 +5523,27 @@ async def _record_recipe_compile_product_evidence(
                 outcome="delivered",
                 expected_task_id=str(operation.get("task_id") or ""),
                 result_ref={
-                    "kind": "recipe_text_result",
+                    "kind": "recipe_compile_result",
                     "id": operation_id,
+                    "reason": compiled.mode,
                     "content": compiled.prompt,
                 },
+                server_recipe_compile=True,
             )
             await _reconcile_recipe_delivery(ctx=ctx, operation=operation)
-        return
-    if compiled.prompt.strip() and compiled.mode in {
-        "timeout_fallback",
-        "memory_cache",
-        "persistent_cache",
-        "deterministic",
-    }:
-        # Recipe use is billable regardless of compilation mode. Persist the
-        # usable prompt as server-owned delivery evidence, not fake model evidence.
-        operation = await asyncio.to_thread(
+            return
+        await asyncio.to_thread(
             finish_agent_product_operation,
             project_dir=state_dir,
             operation_id=operation_id,
-            outcome="delivered",
+            outcome="failed",
             expected_task_id=str(operation.get("task_id") or ""),
-            result_ref={
-                "kind": "recipe_compile_result",
-                "id": operation_id,
-                "reason": compiled.mode,
-                "content": compiled.prompt,
-            },
-            server_recipe_compile=True,
         )
-        await _reconcile_recipe_delivery(ctx=ctx, operation=operation)
-        return
-    await asyncio.to_thread(
-        finish_agent_product_operation,
-        project_dir=state_dir,
-        operation_id=operation_id,
-        outcome="failed",
-        expected_task_id=str(operation.get("task_id") or ""),
-    )
+    except ValueError:
+        # The terminal check above and these writes are separate steps; an
+        # attempt settled in between surfaces as ended, not a 500/503.
+        await _raise_if_recipe_attempt_ended_now(state_dir, operation_id)
+        raise
 
 
 async def _require_recipe_compile_product_admission(
@@ -5568,8 +5599,14 @@ async def _require_recipe_compile_product_admission(
         replayed = await _replayed_recipe_compilation(
             body=body, operation=operation, state_dir=state_dir
         )
-        if replayed is not None or not metered:
+        if replayed is not None:
+            # The saved prompt is read after the status above; never replay an
+            # attempt that was settled failed/cancelled in between.
+            await _raise_if_recipe_attempt_ended_now(state_dir, operation_id)
             return replayed
+        if not metered:
+            return None
+    _raise_if_recipe_attempt_ended(operation)
     if operation.get("status") not in {"reserved", "running", "accepted", "submitted"}:
         raise HTTPException(409, "Recipe result operation is not admitted")
     return None
@@ -5726,22 +5763,35 @@ async def compile_freezone_recipe_batch(
     """Compile several independent node prompts without one failure cancelling the batch."""
     username = str(user.get("username") or "")
     replays: dict[int, RecipeCompileResult] = {}
+    # An ended attempt only stops its own node; the other items still compile.
+    ended: dict[int, str] = {}
     for index, item in enumerate(body.items):
-        replayed = await _require_recipe_compile_product_admission(
-            body=item, user=user, allow_compile_replay=True
-        )
+        try:
+            replayed = await _require_recipe_compile_product_admission(
+                body=item, user=user, allow_compile_replay=True
+            )
+        except HTTPException as exc:
+            if not _is_recipe_attempt_ended(exc):
+                raise
+            ended[index] = str(exc.detail)
+            continue
         if replayed is not None:
             replays[index] = replayed
     pending_compiles = [
         _recipe_compile_args(item, username)
         for index, item in enumerate(body.items)
-        if index not in replays
+        if index not in replays and index not in ended
     ]
     compiled_outcomes = iter(
         await compile_recipe_prompt_batch(pending_compiles) if pending_compiles else []
     )
     items: list[dict[str, Any]] = []
     for index, request in enumerate(body.items):
+        if index in ended:
+            items.append(
+                {"request_id": request.request_id, "ok": False, "error": ended[index]}
+            )
+            continue
         if index in replays:
             items.append(
                 {"request_id": request.request_id, **_recipe_compile_response(replays[index])}
@@ -5774,11 +5824,19 @@ async def compile_freezone_recipe_batch(
                 }
             )
             continue
-        await _record_recipe_compile_product_evidence(
-            body=request,
-            compiled=outcome,
-            user=user,
-        )
+        try:
+            await _record_recipe_compile_product_evidence(
+                body=request,
+                compiled=outcome,
+                user=user,
+            )
+        except HTTPException as exc:
+            if not _is_recipe_attempt_ended(exc):
+                raise
+            items.append(
+                {"request_id": request.request_id, "ok": False, "error": str(exc.detail)}
+            )
+            continue
         items.append(
             {
                 "request_id": request.request_id,
