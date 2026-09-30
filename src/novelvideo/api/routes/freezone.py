@@ -201,6 +201,8 @@ from novelvideo.freezone.agent_product_operations import (
     save_agent_generation_session,
 )
 from novelvideo.freezone.workflow_runs import (
+    RECIPE_ATTEMPT_ENDED_MARKER,
+    RECIPE_ATTEMPT_ENDED_STATUSES,
     _validate_action_artifact,
     WorkflowRunIdempotencyConflict,
     WorkflowRunLeaseConflict,
@@ -217,6 +219,7 @@ from novelvideo.freezone.workflow_runs import (
     reconcile_workflow_runs_with_canvas_nodes,
     reconcile_workflow_runs_with_canvas_results,
     reconcile_workflow_runs_with_tasks,
+    recipe_attempt_ended_message,
     update_workflow_run,
     workflow_media_failure_awaits_retry,
 )
@@ -479,6 +482,17 @@ def _handle_task_start_runtime_error(message: str, exc: RuntimeError) -> None:
     handle_task_start_runtime_error(logger, message, exc)
 
 
+def _raise_if_recipe_attempt_ended(operation: dict[str, Any]) -> None:
+    """Refuse further work on a settled Recipe attempt; only a rerun can proceed."""
+    status = str(operation.get("status") or "")
+    if status in RECIPE_ATTEMPT_ENDED_STATUSES:
+        raise HTTPException(409, recipe_attempt_ended_message(status))
+
+
+def _is_recipe_attempt_ended(exc: HTTPException) -> bool:
+    return exc.status_code == 409 and RECIPE_ATTEMPT_ENDED_MARKER in str(exc.detail)
+
+
 def _verified_workflow_media_link(
     *,
     ctx: ProjectContext,
@@ -501,7 +515,6 @@ def _verified_workflow_media_link(
     if (
         operation is None
         or operation.get("product_kind") != "recipe_result"
-        or operation.get("status") in {"failed", "cancelled"}
         or operation.get("project_id") != ctx.project_id
         or operation.get("canvas_id") != canvas_id
         or operation.get("artifact_id") != node_id
@@ -512,6 +525,7 @@ def _verified_workflow_media_link(
         raise HTTPException(
             409, "workflow media link does not match admitted Recipe attempt"
         )
+    _raise_if_recipe_attempt_ended(operation)
     return {
         "product_operation_id": operation_id,
         "generation_attempt_id": attempt_id,
@@ -5417,8 +5431,10 @@ async def _record_recipe_compile_product_evidence(
     if operation.get("status") == "delivered":
         await _reconcile_recipe_delivery(ctx=ctx, operation=operation)
         return
-    if operation.get("status") in {"failed", "cancelled"}:
-        return
+    # A concurrent request (e.g. a timed-out earlier compile) may have failed
+    # this attempt while we compiled. Returning the prompt would send the
+    # runner on to a media submission that can only 409.
+    _raise_if_recipe_attempt_ended(operation)
     if (
         compiled.mode == "model"
         and str(compiled.model_call_id or "").strip()
@@ -5544,6 +5560,7 @@ async def _require_recipe_compile_product_admission(
         )
         if replayed is not None or not metered:
             return replayed
+    _raise_if_recipe_attempt_ended(operation)
     if operation.get("status") not in {"reserved", "running", "accepted", "submitted"}:
         raise HTTPException(409, "Recipe result operation is not admitted")
     return None
@@ -5700,22 +5717,35 @@ async def compile_freezone_recipe_batch(
     """Compile several independent node prompts without one failure cancelling the batch."""
     username = str(user.get("username") or "")
     replays: dict[int, RecipeCompileResult] = {}
+    # An ended attempt only stops its own node; the other items still compile.
+    ended: dict[int, str] = {}
     for index, item in enumerate(body.items):
-        replayed = await _require_recipe_compile_product_admission(
-            body=item, user=user, allow_compile_replay=True
-        )
+        try:
+            replayed = await _require_recipe_compile_product_admission(
+                body=item, user=user, allow_compile_replay=True
+            )
+        except HTTPException as exc:
+            if not _is_recipe_attempt_ended(exc):
+                raise
+            ended[index] = str(exc.detail)
+            continue
         if replayed is not None:
             replays[index] = replayed
     pending_compiles = [
         _recipe_compile_args(item, username)
         for index, item in enumerate(body.items)
-        if index not in replays
+        if index not in replays and index not in ended
     ]
     compiled_outcomes = iter(
         await compile_recipe_prompt_batch(pending_compiles) if pending_compiles else []
     )
     items: list[dict[str, Any]] = []
     for index, request in enumerate(body.items):
+        if index in ended:
+            items.append(
+                {"request_id": request.request_id, "ok": False, "error": ended[index]}
+            )
+            continue
         if index in replays:
             items.append(
                 {"request_id": request.request_id, **_recipe_compile_response(replays[index])}
@@ -5748,11 +5778,19 @@ async def compile_freezone_recipe_batch(
                 }
             )
             continue
-        await _record_recipe_compile_product_evidence(
-            body=request,
-            compiled=outcome,
-            user=user,
-        )
+        try:
+            await _record_recipe_compile_product_evidence(
+                body=request,
+                compiled=outcome,
+                user=user,
+            )
+        except HTTPException as exc:
+            if not _is_recipe_attempt_ended(exc):
+                raise
+            items.append(
+                {"request_id": request.request_id, "ok": False, "error": str(exc.detail)}
+            )
+            continue
         items.append(
             {
                 "request_id": request.request_id,

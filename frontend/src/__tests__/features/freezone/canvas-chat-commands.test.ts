@@ -6484,6 +6484,63 @@ describe("canvas chat commands", () => {
     }
   });
 
+  it("asks for a rerun instead of retrying an ended Recipe attempt", async () => {
+    const store = useCanvasStore.getState();
+    const imageNodeId = store.addNode(
+      CANVAS_NODE_TYPES.imageGen,
+      { x: 0, y: 0 },
+      { prompt: "商品主图" },
+    );
+    let attempts = 0;
+    // "(503)" would look transient; the ended marker must still win.
+    const ended = "recipe attempt ended (failed); rerun the node to start a new attempt (503)";
+    const unsubscribe = canvasEventBus.subscribe("freezone/run-node-action", (payload) => {
+      if (!payload.requestId) return;
+      attempts += 1;
+      canvasEventBus.publish("freezone/node-action-result", {
+        requestId: payload.requestId,
+        nodeId: payload.nodeId,
+        action: payload.action,
+        status: "error",
+        error: ended,
+      });
+    });
+
+    try {
+      const result = await applyCanvasChatCommandsAsync(
+        extractCanvasChatCommandEnvelopes([{
+          schema_version: CANVAS_CHAT_COMMANDS_SCHEMA_VERSION,
+          commands: [{ type: "run_workflow", node_ids: [imageNodeId] }],
+        }]),
+        {
+          projectId: "project-a",
+          canvasId: "canvas-a",
+          actionTimeoutMs: 100,
+          actionRetryDelayMs: 1,
+        },
+      );
+
+      expect(attempts).toBe(1);
+      const expected = `本次节点执行已结束，请重新运行该节点以开始新的执行（${ended}）`;
+      expect(result.errors.join("\n")).toContain(expected);
+      expect(updateFreezoneWorkflowRun).toHaveBeenCalledWith(
+        "project-a",
+        "canvas-a",
+        "run-test",
+        expect.objectContaining({
+          action_updates: [expect.objectContaining({
+            node_id: imageNodeId,
+            status: "failed",
+            error: expected,
+            retry_count: 0,
+          })],
+        }),
+      );
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("stops downstream actions after the workflow graph changes", async () => {
     const store = useCanvasStore.getState();
     const imageNodeId = store.addNode(
