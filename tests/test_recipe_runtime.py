@@ -90,6 +90,21 @@ def test_retro_skill_keeps_entry_guard_out_of_recipe_runtime_constraints():
     assert "一次性在草稿中列出完整工作流" in skill["planning"]["planning_notes"]
 
 
+def test_kungfu_shot_recipe_requires_per_shot_action_phases():
+    recipe_path = (
+        Path(__file__).resolve().parents[1]
+        / "src/novelvideo/freezone/agent_catalog/builtins/recipes"
+        / "anthropomorphic-kungfu-shot-video.json"
+    )
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    prompt = recipe["system_prompt"]
+
+    assert "当前 Shot 的每个核心动作逐项写出" in prompt
+    assert "不得只写泛化的三段式要求" in prompt
+    assert "每个视频节点自身" in prompt
+    assert "逐动作预备/运动/完成" in recipe["must_have_items"]
+
+
 def test_outdoor_stage_duel_character_elements_use_one_turnaround_reference():
     recipe_path = (
         Path(__file__).resolve().parents[1]

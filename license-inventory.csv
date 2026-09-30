@@ -2603,6 +2603,7 @@ tests/test_cognee_llm_config_refresh.py,Elastic-2.0,2026 SuperTale contributors,
 tests/test_cognee_pipeline_concurrency.py,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 tests/test_cognee_store_close.py,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 tests/test_compose_episode_audio_source.py,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
+tests/test_confirmed_creative_inputs.py,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 tests/test_content_adapter.py,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 tests/test_control_frame_to_sketch.py,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
 tests/test_control_frame_to_sketch_projection.py,Elastic-2.0,2026 SuperTale contributors,REUSE.toml aggregate annotation
