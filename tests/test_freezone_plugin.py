@@ -3617,6 +3617,80 @@ def test_generation_recommendation_uses_explicit_specs_and_keeps_delivery_separa
     }
 
 
+def test_generation_recommendation_preserves_explicit_image_preferences(monkeypatch):
+    """Explicit image settings must not be rejected or replaced by defaults."""
+    plugin = _load_plugin_module()
+    handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
+    events = []
+    monkeypatch.setattr(
+        plugin, "_emit_clarification_event",
+        lambda _project, _canvas, event: events.append(event) or "shown",
+    )
+    monkeypatch.setattr(plugin, "_request", lambda *_args, **_kwargs: _ISSUE_637_IMAGE_CATALOG)
+
+    result = handlers["freezone_request_user_clarification"]({
+        "project_id": "project-a",
+        "generation_media_types": ["image"],
+        "generation_preferences": {
+            "image_resolution": "2K",
+            "image_quality": "medium",
+            "image_variants_per_node": 1,
+        },
+    })
+
+    assert result == "shown"
+    assert events[0]["recommended_answers"]["image_resolution"] == {
+        "option_ids": ["2K"]
+    }
+    assert events[0]["recommended_answers"]["image_quality"] == {
+        "option_ids": ["medium"]
+    }
+    assert events[0]["recommended_answers"]["image_variants_per_node"] == {
+        "option_ids": ["1"]
+    }
+
+
+def test_generation_clarification_rejects_conflicting_shared_and_shot_duration(monkeypatch):
+    plugin = _load_plugin_module()
+    handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
+
+    result = handlers["freezone_request_user_clarification"]({
+        "project_id": "project-a",
+        "generation_media_types": ["video"],
+        "generation_preferences": {
+            "video_duration_seconds": 6,
+            "video_shot_durations_seconds": [6, 7, 6],
+        },
+    })
+
+    assert result["ok"] is False
+    assert result["status"] == "generation_clarification_args_invalid"
+    assert "conflict" in result["error"]
+
+
+def test_generation_clarification_accepts_equal_shared_and_shot_duration(monkeypatch):
+    plugin = _load_plugin_module()
+    handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
+    events = []
+    monkeypatch.setattr(
+        plugin, "_emit_clarification_event",
+        lambda _project, _canvas, event: events.append(event) or "shown",
+    )
+    monkeypatch.setattr(plugin, "_request", lambda *_args, **_kwargs: _ISSUE_674_VIDEO_CATALOG)
+
+    result = handlers["freezone_request_user_clarification"]({
+        "project_id": "project-a",
+        "generation_media_types": ["video"],
+        "generation_preferences": {
+            "video_duration_seconds": 6,
+            "video_shot_durations_seconds": [6, 6, 6],
+        },
+    })
+
+    assert result == "shown"
+    assert "video_duration_seconds" not in [q["id"] for q in events[0]["questions"]]
+
+
 def test_generation_recommendation_shares_one_sided_ratio_for_image_video_card(monkeypatch):
     plugin = _load_plugin_module()
     handlers = {name: handler for name, _schema, handler in plugin.TOOLS}
