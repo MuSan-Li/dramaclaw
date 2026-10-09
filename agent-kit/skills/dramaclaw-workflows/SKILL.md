@@ -12,6 +12,17 @@ Build one coherent workflow transaction, not a sequence of standalone canvas edi
 - Planning authors topology, Recipe selection, dependencies, confirmed parameters, and short
   node task briefs. Each node prompt should state its task, scope, upstream outputs, and reference
   roles in one or two concise sentences. Preserve user-provided story facts and source material.
+  In a compact Intent, keep every user-confirmed quantity, named object, exclusion, and visual
+  continuity anchor in `user_goal`; `planner.units` may distribute steps but must not replace those
+  shared facts with a short summary. Do not invent details the user did not provide.
+  Carry a confirmed visual style into each image/video task brief, or supply it through an actual
+  consumed upstream text output; a Skill title or an unrelated node does not carry that style
+  into a media node by itself.
+  When a video consumes upstream images through `media_input_for`, select a reference-capable
+  generation mode supported by its chosen Catalog model and reference count. Do not leave the
+  mode unset or use `textToVideo`; an edge alone cannot make a text-only mode consume images.
+  If no compatible mode is available, stop on the catalog/preflight blocker instead of dropping
+  the media input or silently changing an explicit user choice.
   Do not invent finished scripts, detailed shot-by-shot storyboards, dialogue, camera choreography,
   sound cues, or final media prompts before upstream stages execute. Execution-time Recipe
   compilation uses actual upstream outputs to produce executable prompts.
@@ -40,6 +51,10 @@ Build one coherent workflow transaction, not a sequence of standalone canvas edi
   `freezone_create_edge`, `freezone_group_nodes`, or other single-operation tools.
 - Never fall back to repeated single-operation writes after a workflow validation or schema error.
   Correct the workflow intent/plan or report the blocking error.
+- Never offer direct canvas commands or standalone node writes as a clarification choice for
+  bypassing WorkflowPlan validation. A user selection cannot authorize that bypass. When a Skill's
+  required stage conflicts with an exact node-only constraint, report the conflict or ask whether
+  the required stage may be added; do not offer an invalid direct-write alternative.
 - Never resubmit an unchanged workflow payload. After one correction, if the same validation path
   fails again in the same turn, stop retrying and report that blocker instead of increasing the
   failure counter.
@@ -76,8 +91,12 @@ canvas execution mode. For every new generation request, call
 `freezone_request_user_clarification` exactly once before any canvas write in both
 `manual_confirm` and `auto_execute`. Historical clarification answers, prior-turn parameters,
 existing node values, and Recipe defaults may prefill recommended choices, but never count as the
-user's selection for the current request. After the clarification result returns for that request,
+user’s selection for the current request. After the clarification result returns for that request,
 do not ask again.
+
+When using `generation_media_types` or `generation_required_choices`, do not include agent-authored
+`questions` in the same call. Generation clarification is one exclusive server-owned mode; ask any
+unrelated business question in a separate turn only when it is actually required.
 
 - In `manual_confirm`, apply the preliminary answers to the plan, then submit the protected write.
   The normal approval card is still shown and remains the final parameter editor.
@@ -103,11 +122,11 @@ completion.
 Offer a recommended/default option so the user does not need to understand provider-specific
 fields. In either execution mode, do not draft, commit, approve, or run until the required
 clarification result returns. This is an explicit exception to a host's general rule not to ask about model
-parameters. It applies only to image and video generation for now, and only when the operation will
-generate media (including `run_after_create=true`); do not ask when the user only wants empty nodes,
-connections, grouping, layout, or edits without generation. Choices explicit in the current user
-request, Recipe, existing node data, or history should be preselected in the card, not used to skip
-the card.
+parameters. It applies only to image and video generation for now. It also applies with
+`run_after_create=false` when the user explicitly asks to configure image/video node parameters;
+do not ask when the user only wants empty nodes, connections, grouping, layout, or edits without
+generation parameters. Choices explicit in the current user request, Recipe, existing node data,
+or history should be preselected in the card, not used to skip the card.
 
 The portable workflow intent carries confirmed shared choices in `inputs`:
 
@@ -152,6 +171,16 @@ values; a result with `status="generation_answers_incomplete"` means the choice 
 and must be asked again, never defaulted. Approval behavior remains controlled by the execution
 mode.
 
+For a raw custom Plan, set `plan.schema_version="freezone_workflow_plan.v1"`. A confirmed video
+reference mode belongs in `plan.inputs.video_generation_mode` and in each matching video node's
+`data.genMode`; keep them identical and verify that the selected Catalog model supports that mode.
+Put each shot's duration in `data.durationSec` (seconds), not `data.durationSeconds`. The
+`generation_answers` argument is only the unchanged `answers` object returned by
+`freezone_request_user_clarification`: never append `video_generation_mode` or hand-built fields
+to it. If preflight reports an incompatible model/mode, preserve any explicit user mode; choose a
+compatible Catalog model when available, otherwise ask the user. For an unstated mode, choose a
+reference-capable mode supported by the selected model and the actual number of incoming images.
+
 When the user does not specify internal media settings, use `"recommended"` only for the media
 model preference in the portable intent or Plan. The authorized preflight resolves it to a concrete
 model id and compatible parameters from one scoped live Catalog snapshot before saving the draft.
@@ -177,7 +206,8 @@ including `480P` whenever the schema lists it.
 3. Call `freezone_begin_agent_product_generation` with `product_kind="workflow_result"`, a stable
    generation session, `skill_id`, `skill_version`, `artifact_id="<skill_id>@<skill_version>"`,
    and the normalized inputs before authoring the result. These Skill identities must match the
-   later compiled result.
+   later compiled result. Copy the returned `operation_id` exactly; never invent, abbreviate, or
+   reconstruct one, and never call a prepare tool before this admission succeeds.
 4. For a normal workflow, submit one compact `freezone_workflow_intent.v1` and the admitted
    `operation_id` to `freezone_prepare_workflow`. The backend compiles and validates it; do not
    run a separate compile first.
