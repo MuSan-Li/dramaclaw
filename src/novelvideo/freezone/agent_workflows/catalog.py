@@ -2639,6 +2639,29 @@ def _compile_dynamic_recipe_items_intent(
         )
 
     recipes = _intent_recipe_index()
+    use_native_social_ratios = False
+    if _text(skill.get("id")) == "social-content-campaign":
+        supplied = _workflow_input_values(intent)
+        recipe_ids = {
+            _text(item.get("recipe_id") or item.get("recipeId"))
+            for item in items if isinstance(item, dict)
+        }
+        platform_recipes = recipe_ids & _SOCIAL_IMAGE_RECIPE_PLATFORMS.keys()
+        if platform_recipes and not {"aspect_ratio", "image_aspect_ratio"} & supplied.keys():
+            compatible = set.intersection(*(
+                _SOCIAL_IMAGE_RECIPE_RATIOS[recipe_id] for recipe_id in platform_recipes
+            ))
+            resolved_inputs = dict(resolved_inputs)
+            if compatible:
+                default_ratio = _text(resolved_inputs.get("aspect_ratio"))
+                resolved_inputs["aspect_ratio"] = (
+                    default_ratio if default_ratio in compatible else
+                    "1:1" if "1:1" in compatible else sorted(compatible)[0]
+                )
+            else:
+                # Different platforms may need different native image ratios.
+                resolved_inputs.pop("aspect_ratio", None)
+                use_native_social_ratios = True
     allowed_recipe_ids = {
         _text(item) for item in skill.get("allowed_recipe_ids") or [] if _text(item)
     }
@@ -2804,6 +2827,8 @@ def _compile_dynamic_recipe_items_intent(
             resolved_inputs=resolved_inputs,
             recipe_pipeline=recipe_pipeline,
         )
+        if use_native_social_ratios and recipe_id in _SOCIAL_IMAGE_NATIVE_RATIOS:
+            node["data"]["aspectRatio"] = _SOCIAL_IMAGE_NATIVE_RATIOS[recipe_id]
         explicit_stage = _text(item.get("stage"))
         if explicit_stage:
             node["stage"] = explicit_stage
@@ -3005,6 +3030,31 @@ def _compile_dynamic_recipe_items_intent(
     edges = _dedupe_intent_edges(edges)
     skill_id = _text(skill.get("id"))
     title = _text(intent.get("title")) or _catalog_label(skill)
+    if skill_id == "social-content-campaign":
+        # Explicit intent items determine the deliverable. Keep the compiled
+        # Plan's Skill inputs in sync when optional values were not supplied.
+        supplied = _workflow_input_values(intent)
+        image_nodes = [node for node in nodes if node.get("node_type") == "imageGenNode"]
+        resolved_inputs = dict(resolved_inputs)
+        if image_nodes and "image_count" not in supplied:
+            resolved_inputs["image_count"] = len(image_nodes)
+        recipe_ids = [
+            _text((node.get("data") or {}).get("workflowCatalog", {}).get("recipeId"))
+            for node in image_nodes
+        ]
+        if recipe_ids and "platforms" not in supplied and all(
+            recipe_id in _SOCIAL_IMAGE_RECIPE_PLATFORMS for recipe_id in recipe_ids
+        ):
+            resolved_inputs["platforms"] = list(dict.fromkeys(
+                _SOCIAL_IMAGE_RECIPE_PLATFORMS[recipe_id] for recipe_id in recipe_ids
+            ))
+        if "aspect_ratio" not in supplied and resolved_inputs.get("image_aspect_ratio"):
+            resolved_inputs["aspect_ratio"] = resolved_inputs["image_aspect_ratio"]
+    plan_inputs = dict(resolved_inputs)
+    if (skill_id == "social-content-campaign" and "platforms" not in supplied
+            and any(recipe_id not in _SOCIAL_IMAGE_RECIPE_PLATFORMS for recipe_id in recipe_ids)):
+        # Keep an unspecified platform distinct from an explicit default choice.
+        plan_inputs.pop("platforms", None)
     plan = {
         "schema_version": PLAN_SCHEMA_VERSION,
         "workflow_type": f"dynamic.{skill_id}",
@@ -3021,7 +3071,7 @@ def _compile_dynamic_recipe_items_intent(
         "assumptions": list(intent.get("assumptions") or []),
         "missing_inputs": [],
         "expansion_rules": {"item_count": len(items)},
-        "inputs": resolved_inputs,
+        "inputs": plan_inputs,
         "external_inputs": deepcopy(external_inputs),
         "nodes": nodes,
         "edges": edges,
@@ -3901,6 +3951,133 @@ def _noncanonical_video_duration_blockers(nodes: list[Any]) -> list[dict[str, st
     return blockers
 
 
+_SOCIAL_IMAGE_RECIPE_PLATFORMS = {
+    "social-xiaohongshu-image": "小红书",
+    "social-douyin-cover": "抖音",
+    "social-weibo-wechat-image": "微博/微信",
+    "social-ig-post": "Instagram",
+}
+
+_SOCIAL_IMAGE_RECIPE_RATIOS = {
+    "social-xiaohongshu-image": {"3:4"},
+    "social-douyin-cover": {"9:16"},
+    "social-weibo-wechat-image": {"16:9", "1:1"},
+    "social-ig-post": {"1:1", "4:5"},
+}
+
+_SOCIAL_IMAGE_NATIVE_RATIOS = {
+    "social-xiaohongshu-image": "3:4",
+    "social-douyin-cover": "9:16",
+    "social-weibo-wechat-image": "1:1",
+    "social-ig-post": "1:1",
+}
+
+
+def _social_campaign_plan_input_errors(
+    plan: dict[str, Any], resolved_inputs: dict[str, Any]
+) -> list[dict[str, str]]:
+    """Reject a ready social draft whose Skill defaults contradict its image plan."""
+    images = [
+        node
+        for node in plan.get("nodes") or []
+        if isinstance(node, dict)
+        and _text(node.get("node_type") or node.get("type")) == "imageGenNode"
+    ]
+    if not images:
+        return []
+    errors: list[dict[str, str]] = []
+    image_count = resolved_inputs.get("image_count")
+    if isinstance(image_count, int) and not isinstance(image_count, bool):
+        if image_count != len(images):
+            errors.append({
+                "path": "inputs.image_count",
+                "message": "image_count must match the number of image nodes",
+            })
+
+    recipe_ids: list[str] = []
+    ratios: set[str] = set()
+    for node in images:
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        catalog = data.get("workflowCatalog")
+        recipe_ids.append(
+            _text(catalog.get("recipeId")) if isinstance(catalog, dict) else ""
+        )
+        ratio = _text(data.get("aspectRatio"))
+        recipe_id = recipe_ids[-1]
+        if not ratio and recipe_id in _SOCIAL_IMAGE_RECIPE_RATIOS:
+            errors.append({
+                "path": "inputs.aspect_ratio",
+                "message": f"{recipe_id} requires an image aspect ratio",
+            })
+        if ratio:
+            ratios.add(ratio)
+            if (recipe_id in _SOCIAL_IMAGE_RECIPE_RATIOS
+                    and ratio not in _SOCIAL_IMAGE_RECIPE_RATIOS[recipe_id]):
+                errors.append({
+                    "path": "inputs.aspect_ratio",
+                    "message": f"{recipe_id} does not support image aspect ratio {ratio}",
+                })
+    selected_platforms = {
+        _SOCIAL_IMAGE_RECIPE_PLATFORMS[recipe_id]
+        for recipe_id in recipe_ids
+        if recipe_id in _SOCIAL_IMAGE_RECIPE_PLATFORMS
+    }
+    platforms = resolved_inputs.get("platforms")
+    explicit_platforms = "platforms" in (plan.get("inputs") or {})
+    if isinstance(platforms, list):
+        stated_platforms = set(platforms)
+        if selected_platforms - stated_platforms or (
+            explicit_platforms and stated_platforms != selected_platforms
+        ):
+            errors.append({
+                "path": "inputs.platforms",
+                "message": "platforms must match the selected platform image Recipes",
+            })
+
+    explicit_ratio = any(
+        key in (plan.get("inputs") or {})
+        for key in ("aspect_ratio", "image_aspect_ratio")
+    )
+    aspect_ratio = resolved_inputs.get("aspect_ratio")
+    image_aspect_ratio = resolved_inputs.get("image_aspect_ratio")
+    if explicit_ratio and aspect_ratio and (
+        (image_aspect_ratio and aspect_ratio != image_aspect_ratio)
+        or any(ratio != aspect_ratio for ratio in ratios)
+    ):
+        errors.append({
+            "path": "inputs.aspect_ratio",
+            "message": "aspect_ratio must match the planned image aspect ratio",
+        })
+    return errors
+
+
+def _pixar_character_source_errors(
+    plan: dict[str, Any], resolved_inputs: dict[str, Any]
+) -> list[dict[str, str]]:
+    method = _text(resolved_inputs.get("character_input_method"))
+    for node in plan.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        catalog = data.get("workflowCatalog") if isinstance(data.get("workflowCatalog"), dict) else {}
+        if catalog.get("recipeId") != "ad-ip-character-anchor":
+            continue
+        confirmed = catalog.get("confirmedInputs")
+        confirmed_method = (
+            _text(confirmed.get("character_input_method"))
+            if isinstance(confirmed, dict) else ""
+        )
+        prompt = _text(data.get("prompt") or node.get("prompt"))
+        if (confirmed_method and confirmed_method != method) or (
+            "自定义角色" in prompt and method != "自定义角色"
+        ):
+            return [{
+                "path": "inputs.character_input_method",
+                "message": "character_input_method must match the character anchor source",
+            }]
+    return []
+
+
 def _quick_drama_visual_style_blockers(
     plan: dict[str, Any], visual_style: Any,
 ) -> list[dict[str, str]]:
@@ -4044,6 +4221,24 @@ def validate_agent_workflow_plan(
         }
         for parameter_id in input_contract["missing_required"]
     )
+    if skill_id == "social-content-campaign":
+        if not {"aspect_ratio", "image_aspect_ratio"} & plan_inputs.keys():
+            ratios = {
+                _text(node.get("data", {}).get("aspectRatio"))
+                for node in plan.get("nodes") or []
+                if isinstance(node, dict) and node.get("node_type") == "imageGenNode"
+                and isinstance(node.get("data"), dict)
+                and _text(node["data"].get("aspectRatio"))
+            }
+            if len(ratios) == 1:
+                input_contract["resolved"]["aspect_ratio"] = next(iter(ratios))
+            elif len(ratios) > 1:
+                input_contract["resolved"].pop("aspect_ratio", None)
+        errors.extend(
+            _social_campaign_plan_input_errors(plan, input_contract["resolved"])
+        )
+    if skill_id == "pixar-ip-ad-video":
+        errors.extend(_pixar_character_source_errors(plan, input_contract["resolved"]))
     for index, node in enumerate(plan.get("nodes") or []):
         node_type = (
             _text(node.get("node_type") or node.get("type"))
