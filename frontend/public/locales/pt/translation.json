@@ -779,6 +779,15 @@
     }
   },
   "aiAssistant": {
+    "directorRunMode": {
+      "manualLabel": "Modo manual",
+      "manualDescription": "Confirmar cada etapa de geração antes da execução",
+      "autoLabel": "Execução automática do episódio",
+      "autoDescription": "Após uma segunda confirmação, avançar automaticamente neste episódio até ocorrer uma falha ou o vídeo final estar concluído",
+      "running": "Execução automática do episódio · Em curso",
+      "awaitingIntervention": "Execução automática do episódio · A aguardar confirmação das alterações",
+      "awaitingConfirmation": "Execução automática do episódio · A aguardar confirmação"
+    },
     "clearChat": {
       "title": "Limpar esta conversa?",
       "description": "O histórico desta conversa será eliminado. A sua próxima mensagem iniciará um novo contexto do Agent. A área de trabalho, o projeto e as outras conversas permanecerão inalterados. As tarefas de geração em execução continuarão.",
@@ -927,6 +936,31 @@
   },
   "freezone": {
     "chat": {
+      "currentSelection": "Seleção atual",
+      "usedThisTurn": "Utilizado neste turno",
+      "removeReference": "Remover referência da área de trabalho",
+      "removeAllReferences": "Remover todas as referências da área de trabalho",
+      "clearReferences": "Limpar tudo",
+      "selectSkill": "Escolher uma Skill",
+      "skillMenu": {
+        "title": "Skills",
+        "create": "Criar",
+        "search": "Pesquisar Skills",
+        "noMatches": "Nenhuma Skill corresponde à pesquisa",
+        "empty": "Ainda não há Skills aqui",
+        "unavailable": "Ainda não há Skills disponíveis",
+        "emptyHelp": "Peça ao agente para transformar a área de trabalho atual numa Skill ou descreva o seu fluxo de trabalho para criar uma Skill personalizada.",
+        "actions": {
+          "summarize-canvas": "Transformar a área de trabalho numa Skill",
+          "create-with-agent": "Criar uma Skill com o agente"
+        }
+      },
+      "executionMode": {
+        "manualLabel": "Confirmação manual",
+        "manualDescription": "O agente pede confirmação antes de executar comandos na área de trabalho",
+        "autoLabel": "Geração automática",
+        "autoDescription": "O agente executa automaticamente comandos seguros e apresenta os resultados"
+      },
       "title": "Xia Director",
       "description": "Abra o Xia Director junto ao ecrã Freezone.",
       "toggle": "Abrir o Xia Director da Freezone",
@@ -5867,7 +5901,7 @@
       "downloadFailed": "Falha na transferência do áudio"
     },
     "copyNodeId": "Copiar ID do nó",
-    "nodeId": "ID"
+    "nodeId": "ID do nó"
   },
   "multiAngleEditor": {
     "title": "Editor multidimensional",
@@ -8160,6 +8194,15 @@
       }
     },
     "mediaStorage": {
+      "errors": {
+        "MEDIA_STORAGE_TIMEOUT": "A ligação ao armazenamento de multimédia excedeu o tempo limite. Verifique a rede e tente novamente.",
+        "MEDIA_STORAGE_AUTH_INVALID": "As credenciais de armazenamento de multimédia são inválidas. Verifique a AccessKey / API Key.",
+        "MEDIA_STORAGE_ACCESS_DENIED": "Acesso ao armazenamento de multimédia recusado. Verifique as credenciais e as permissões de carregamento e leitura.",
+        "MEDIA_STORAGE_TARGET_INVALID": "O destino de armazenamento de multimédia não está disponível. Verifique o bucket, o endpoint ou a pasta.",
+        "MEDIA_STORAGE_CONFIG_INVALID": "A configuração do armazenamento de multimédia está incompleta ou o carregamento falhou. Verifique as definições do armazenamento selecionado.",
+        "MEDIA_STORAGE_UNAVAILABLE": "A verificação de leitura e escrita do armazenamento de multimédia falhou. Verifique a ligação e as definições e tente novamente.",
+        "MEDIA_STORAGE_READ_MISMATCH": "A verificação de leitura do armazenamento de multimédia falhou. Verifique as definições de acesso ao armazenamento."
+      },
       "title": "Alojamento de imagens/Armazenamento de multimédia",
       "description": "Configure a retransmissão temporária de conteúdos multimédia de referência utilizada pela NewAPI e pelos modelos upstream, através do Aliyun OSS ou do Cloudinary.",
       "fullyManagedUpload": "Carregamento de recursos totalmente gerido",

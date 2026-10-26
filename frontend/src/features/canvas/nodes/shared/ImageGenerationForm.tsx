@@ -164,7 +164,7 @@ function AspectSizeChip({
         >
           {showQuality && (
             <>
-              <div className={IMAGE_PARAM_LABEL_CLASS}>{t("node.imageGeneration.quality")}</div>
+              <div className={IMAGE_PARAM_LABEL_CLASS}>{t('node.imageGen.param.quality')}</div>
               <div className={IMAGE_PARAM_ROW_CLASS}>
                 {qualityOptions.map((value) => {
                   const label = t(`node.imageGen.quality.${value}`, { defaultValue: value });
@@ -187,7 +187,7 @@ function AspectSizeChip({
               </div>
             </>
           )}
-          <div className={IMAGE_PARAM_LABEL_CLASS}>{t("node.imageGeneration.resolution")}</div>
+          <div className={IMAGE_PARAM_LABEL_CLASS}>{t('node.imageGen.param.resolution')}</div>
           <div className={IMAGE_PARAM_ROW_CLASS}>
             {sizeOptions.map((option) => {
               const isActive = size === option;
@@ -208,7 +208,7 @@ function AspectSizeChip({
             })}
           </div>
 
-          <div className={IMAGE_PARAM_LABEL_CLASS}>{t("node.imageGeneration.aspectRatio")}</div>
+          <div className={IMAGE_PARAM_LABEL_CLASS}>{t('node.imageGen.param.aspect')}</div>
           <div className="grid grid-cols-4 gap-2">
             {aspectOptions.map((option) => {
               const isActive = nearestAspect.value === option.value;
@@ -271,8 +271,7 @@ function StyleChip({ selectedId, selectedLabel, onChange, onOpenChange }: StyleC
   }, [isOpen]);
 
   const isActive = Boolean(selectedId);
-  const fallbackLabel = t('node.stylePicker.title');
-  const label = isActive ? selectedLabel ?? fallbackLabel : fallbackLabel;
+  const label = isActive ? selectedLabel ?? t('canvas.style.chip') : t('canvas.style.chip');
 
   return (
     <div className="relative">
@@ -283,7 +282,7 @@ function StyleChip({ selectedId, selectedLabel, onChange, onOpenChange }: StyleC
           event.stopPropagation();
           setIsOpen((prev) => !prev);
         }}
-        title={isActive ? selectedLabel ?? undefined : t('node.stylePicker.title')}
+        title={isActive ? selectedLabel ?? undefined : t('canvas.style.chip')}
         className={`${NODE_TEXT_CONTROL_TRIGGER_CLASS} max-w-[160px]`}
       >
         <Palette className={`${NODE_TEXT_CONTROL_ICON_CLASS} shrink-0`} />
@@ -443,7 +442,7 @@ function CountSelect({ value, onChange }: CountSelectProps) {
         }}
         className={NODE_TEXT_CONTROL_TRIGGER_CLASS}
       >
-        <span>{t('freezone.chat.generationParams.imageCount', { count: value })}</span>
+        <span>{t('node.imageGen.countValue', { count: value })}</span>
         <ChevronDown className="h-3 w-3 text-text-muted/90" />
       </button>
       {isOpen && (
@@ -467,7 +466,7 @@ function CountSelect({ value, onChange }: CountSelectProps) {
                     : 'text-text-muted/95 hover:bg-white/[0.11] hover:text-text-dark'
                 }`}
               >
-                {t('freezone.chat.generationParams.imageCount', { count: option })}
+                {t('node.imageGen.countValue', { count: option })}
               </button>
             );
           })}
@@ -677,10 +676,10 @@ export const ImageGenerationForm = memo((props: ImageGenerationFormProps) => {
             onOpenAssetLibrary();
           }}
           className={`${NODE_TEXT_CONTROL_TRIGGER_CLASS} group/asset px-1.5`}
-          title={t("node.imageGeneration.assetLibraryHint")}
+          title={t('node.imageGen.assetLibraryTitle')}
         >
           <Library className={`${NODE_TEXT_CONTROL_ICON_CLASS} group-hover/asset:text-text-dark`} />
-          <span>{t("node.imageGeneration.assetLibrary")}</span>
+          <span>{t('node.imageGen.assetLibrary')}</span>
         </button>
         {upstreamTextContents.map((content) => (
           <ReferenceTextChip
@@ -699,9 +698,7 @@ export const ImageGenerationForm = memo((props: ImageGenerationFormProps) => {
                 <div
                   key={`upstream-image-${content.nodeId}`}
                   className={NODE_REFERENCE_MEDIA_CHIP_CLASS}
-                  title={t("node.imageGeneration.upstreamReference", {
-                    name: content.displayName ?? content.nodeType,
-                  })}
+                  title={t('node.imageGen.fromUpstream', { name: content.displayName ?? content.nodeType })}
                   onMouseEnter={(event) => {
                     setRefHover({
                       imageUrl: url,
@@ -720,7 +717,7 @@ export const ImageGenerationForm = memo((props: ImageGenerationFormProps) => {
                       「图片」，序号只存在于提交给后端的 prompt（@图片N）里。 */}
                   <button
                     type="button"
-                    title={t("node.imageGeneration.detachReference")}
+                    title={t('node.imageGen.dropReference')}
                     className={NODE_REFERENCE_MEDIA_DETACH_CLASS}
                     onMouseDown={(event) => event.stopPropagation()}
                     onClick={(event) => {

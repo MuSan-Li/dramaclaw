@@ -36,10 +36,10 @@ export function StylePickerPopover({
     }
     return Array.from(buckets.entries()).map(([key, items]) => ({
       key,
-      label: key === '__other__' ? t('node.stylePicker.other') : key,
+      label: key === '__other__' ? t('canvas.styleGallery.other') : key,
       items,
     }));
-  }, [t, templates]);
+  }, [templates, t]);
 
   return (
     <div
@@ -48,7 +48,7 @@ export function StylePickerPopover({
       onClick={(event) => event.stopPropagation()}
     >
       <div className="flex h-11 shrink-0 items-center justify-between px-4">
-        <span className="text-sm font-medium text-text-dark">{t('node.stylePicker.title')}</span>
+        <span className="text-sm font-medium text-text-dark">{t('canvas.style.chip')}</span>
         <div className="flex items-center gap-1">
           {selectedId && (
             <button
@@ -56,14 +56,14 @@ export function StylePickerPopover({
               onClick={() => onSelect(null)}
               className="h-7 rounded-md px-2 text-[11px] font-medium text-text-dark/78 transition-colors hover:bg-white/[0.08] hover:text-text-dark"
             >
-              {t('node.stylePicker.clear')}
+              {t('canvas.style.clear')}
             </button>
           )}
           <button
             type="button"
             onClick={onClose}
             className="flex size-6 items-center justify-center rounded-md text-text-muted/90 transition-colors hover:bg-white/[0.08] hover:text-text-dark"
-            aria-label={t('node.stylePicker.close')}
+            aria-label={t('common.close')}
           >
             <X className="size-3.5" />
           </button>
@@ -73,12 +73,12 @@ export function StylePickerPopover({
       <div className="ui-scrollbar nowheel flex-1 overflow-y-auto px-4 pb-3 pt-1">
         {isLoading && templates.length === 0 && (
           <div className="flex h-20 items-center justify-center text-[11px] text-text-muted">
-            {t('node.stylePicker.loading')}
+            {t('canvas.styleGallery.loading')}
           </div>
         )}
         {!isLoading && templates.length === 0 && (
           <div className="flex h-20 items-center justify-center text-[11px] text-text-muted">
-            {t('node.stylePicker.empty')}
+            {t('canvas.styleGallery.empty')}
           </div>
         )}
         {grouped.map((group) => (

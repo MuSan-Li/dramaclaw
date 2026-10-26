@@ -2,6 +2,7 @@
 // Copyright (c) 2026 ClaymoreLab
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import {
   AlertCircle,
   CheckCircle2,
@@ -25,7 +26,7 @@ import {
   WORKFLOW_RUN_UPDATED_EVENT,
   type WorkflowRunUpdatedDetail,
 } from "@/features/canvas/application/workflowExecutionActivity";
-import { resolveNodeDisplayName } from "@/features/canvas/domain/nodeDisplay";
+import { localizeNodeDisplayName, resolveNodeDisplayName } from "@/features/canvas/domain/nodeDisplay";
 import type { CanvasNode } from "@/features/canvas/domain/canvasNodes";
 import {
   applyCanvasChatCommandsAsync,
@@ -412,6 +413,7 @@ export function selectWorkflowActivityLabels(
     phase: FreezoneWorkflowRunAction["phase"],
   ) => string = (nodeLabel) => nodeLabel,
   tasksByKey: ReadonlyMap<string, TaskState> = new Map(),
+  t?: TFunction,
 ): string[] {
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   return [...new Set(
@@ -424,7 +426,10 @@ export function selectWorkflowActivityLabels(
       ) return [];
       const node = nodesById.get(action.node_id);
       if (!node?.type) return [];
-      return [formatLabel(resolveNodeDisplayName(node.type, node.data), action.phase)];
+      const label = t
+        ? localizeNodeDisplayName(node.type, node.data, t)
+        : resolveNodeDisplayName(node.type, node.data);
+      return [formatLabel(label, action.phase)];
     }),
   )];
 }
@@ -435,6 +440,7 @@ export function selectChatTaskItems(
   canvasId: string | null,
   now = Date.now(),
   scope: ChatTaskStatusScope = "canvas",
+  t?: TFunction,
 ): ChatTaskItem[] {
   if (scope === "canvas" && !canvasId) return [];
 
@@ -510,7 +516,9 @@ export function selectChatTaskItems(
       nodeId: node?.id ?? null,
       nodeLabel:
         node && node.type
-          ? resolveNodeDisplayName(node.type, node.data)
+          ? t
+            ? localizeNodeDisplayName(node.type, node.data, t)
+            : resolveNodeDisplayName(node.type, node.data)
           : null,
     });
   }
@@ -561,9 +569,10 @@ export function ChatTaskStatusBar({
         canvasId,
         now,
         scope,
+        t,
       );
     },
-    [tasks, taskProjectId, nodes, canvasId, now, projectId, scope],
+    [tasks, taskProjectId, nodes, canvasId, now, projectId, scope, t],
   );
   const items = useMemo(
     () => aggregateChatTaskBatchItems(taskItems, t),
@@ -616,6 +625,7 @@ export function ChatTaskStatusBar({
         { name: nodeLabel },
       ),
       workflowTasksByKey,
+      t,
     ),
     [nodes, t, workflowRun, workflowTasksByKey],
   );
@@ -724,7 +734,7 @@ export function ChatTaskStatusBar({
   const workflowNodeLabel = (action: FreezoneWorkflowRunAction | null): string | null => {
     if (!action) return null;
     const node = nodeById.get(action.node_id);
-    return node?.type ? resolveNodeDisplayName(node.type, node.data) : null;
+    return node?.type ? localizeNodeDisplayName(node.type, node.data, t) : null;
   };
   const workflowActionLabel = (action: FreezoneWorkflowRunAction): string => {
     if (action.status === "completed") return t("taskCenter.chatStatus.workflowPhase.completed");
